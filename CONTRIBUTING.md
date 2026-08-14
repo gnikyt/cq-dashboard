@@ -92,6 +92,26 @@ This module observes cq, it does not extend it:
 4. Anything that belongs in the engine belongs in `cq`, not here
 5. Keep the core dependency-light: no build step, no framework
 
+### Adding a database backend
+
+`store.Store` is the only seam: the sink and the web layer never see a driver.
+A new backend is one package that satisfies the interface, and it is not done
+until it passes the shared conformance suite:
+
+```go
+func TestConformance(t *testing.T) {
+	storetest.RunSuite(t, func(t *testing.T) store.Store {
+		// Return a fresh, migrated, empty store. Clean up with t.Cleanup.
+	})
+}
+```
+
+The suite is the specification. It pins the semantics that are easy to get
+subtly wrong and impossible to notice by eye: out-of-order events merging
+without regressing state, epoch isolation for cq's per-process job IDs,
+lineage scoped to one epoch, prune never touching unfinished work, and a
+frozen `Before` window for pagination.
+
 ### Templates
 
 Template errors only surface at execution, so every view needs a rendering

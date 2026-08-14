@@ -249,6 +249,22 @@ Other properties worth knowing:
 - Authorization covers **controls only**. The read-only views are not
   protected... put your own middleware in front if history is sensitive.
 
+## Other databases
+
+SQLite is the bundled backend, not an assumption. `store.Store` is the only
+seam: the sink and the web layer never touch a driver. A new backend is one
+package implementing that interface, and `store/storetest` is the conformance
+suite it must pass... the same 19 cases the SQLite driver runs, covering the
+semantics rather than the SQL: out-of-order merges, epoch isolation, lineage
+scoping, prune boundaries, frozen pagination windows.
+
+Two things to know before pointing several processes at one shared database:
+`ReconcileEpoch` currently marks every *other* epoch's unfinished jobs as
+interrupted, which is right for one process restarting and wrong for two
+running side by side. Epochs need liveness before that is safe. And the
+bundled SQLite driver caps itself to a single connection, which a networked
+database should not.
+
 ## Design notes
 
 **The sink never does I/O in a hook.** cq invokes hooks synchronously on the
