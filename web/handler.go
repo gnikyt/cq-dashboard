@@ -42,9 +42,12 @@ type Handler struct {
 	onAudit     func(AuditEntry)
 	csrf        string
 
-	login      PasswordCheck
-	secret     []byte
-	sessionTTL time.Duration
+	login         PasswordCheck
+	secret        []byte
+	sessionTTL    time.Duration
+	revoked       *revocations
+	attempts      *attemptLimiter
+	secureCookies *bool
 
 	optErr error // First misconfiguration found while applying options.
 }
@@ -286,8 +289,10 @@ func (h *Handler) newPage(r *http.Request, title string, nav string, counts stor
 	}
 	out := page{Title: title, Nav: nav, FailureCount: failures}
 	if h.login != nil {
-		out.Subject, _ = h.sessionSubject(r)
-		out.CSRF = h.csrf
+		if found, ok := h.sessionFrom(r); ok {
+			out.Subject = found.Subject
+			out.CSRF, _ = h.csrfFor(r)
+		}
 	}
 	return out
 }
@@ -357,7 +362,7 @@ func (h *Handler) overview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	data := h.liveData()
+	data := h.liveData(r)
 	data.page = h.newPage(r, "Overview", "overview", counts)
 	data.Counts = counts
 	data.Written = h.sink.Written()
@@ -464,21 +469,26 @@ func toneFor(count int) string {
 
 // livePartial re-renders everything read live from cq, for polling.
 func (h *Handler) livePartial(w http.ResponseWriter, r *http.Request) {
-	h.render(w, "live.html", h.liveData())
+	h.render(w, "live.html", h.liveData(r))
 }
 
 // liveData snapshots everything read straight from cq rather than the store.
 // The controls ride along because they live inside the queues panel, which is
 // part of the polled region.
-func (h *Handler) liveData() overviewData {
+func (h *Handler) liveData(r *http.Request) overviewData {
 	data := overviewData{
 		Queues:    h.queueViews(),
 		Pending:   h.pendingViews(),
 		Schedules: h.scheduleViews(),
 		Dropped:   h.sink.Dropped(),
 	}
+	// Only an authorized caller gets the token. Rendering it for anyone would
+	// hand an attacker the other half of a control request, and in the
+	// Authorizer configuration the views themselves may be public.
 	if h.controls {
-		data.Controls = controlsData{Queues: h.controlViews(), CSRF: h.csrf}
+		if token, ok := h.csrfFor(r); ok {
+			data.Controls = controlsData{Queues: h.controlViews(), CSRF: token}
+		}
 	}
 	return data
 }
@@ -818,6 +828,10 @@ func (h *Handler) render(w http.ResponseWriter, name string, data any) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	// These pages carry job names, attributes, error strings, the operator's
+	// identity and a CSRF token. Nothing between here and the browser should
+	// keep a copy.
+	w.Header().Set("Cache-Control", "no-store, private")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = buf.WriteTo(w)
 }

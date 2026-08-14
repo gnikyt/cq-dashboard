@@ -76,7 +76,12 @@ func newControlHarness(t *testing.T, opts ...Option) (*Handler, *cq.Queue, *audi
 // csrfToken scrapes the token the handler rendered into its control forms.
 func csrfToken(t *testing.T, handler *Handler) string {
 	t.Helper()
-	body := get(t, handler, "/cq/")
+	// The token is only rendered for an authorized caller now.
+	req := httptest.NewRequest(http.MethodGet, "/cq/", nil)
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	body := rec.Body.String()
 	match := regexp.MustCompile(`name="csrf" value="([a-f0-9]+)"`).FindStringSubmatch(body)
 	if match == nil {
 		t.Fatal("GET /cq/: no csrf token in the control forms")
@@ -454,12 +459,28 @@ func newLoginHarness(t *testing.T) (*Handler, *cq.Queue) {
 	return handler, queue
 }
 
+// loginToken fetches the login form and returns its CSRF cookie and token.
+func loginToken(t *testing.T, handler *Handler) (*http.Cookie, string) {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/cq/login", nil))
+	for _, cookie := range rec.Result().Cookies() {
+		if cookie.Name == loginCSRFCookie {
+			return cookie, cookie.Value
+		}
+	}
+	t.Fatal("GET /cq/login: no login csrf cookie issued")
+	return nil, ""
+}
+
 // signIn posts the login form and returns the session cookie.
 func signIn(t *testing.T, handler *Handler, user, pass string) *http.Cookie {
 	t.Helper()
-	form := url.Values{"username": {user}, "password": {pass}}
+	guard, token := loginToken(t, handler)
+	form := url.Values{"username": {user}, "password": {pass}, "csrf": {token}}
 	req := httptest.NewRequest(http.MethodPost, "/cq/login", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(guard)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusSeeOther {
@@ -500,9 +521,11 @@ func TestLoginRedirectsAnonymousVisitors(t *testing.T) {
 func TestLoginRejectsBadCredentials(t *testing.T) {
 	handler, _ := newLoginHarness(t)
 
-	form := url.Values{"username": {"ops"}, "password": {"wrong"}}
+	guard, token := loginToken(t, handler)
+	form := url.Values{"username": {"ops"}, "password": {"wrong"}, "csrf": {token}}
 	req := httptest.NewRequest(http.MethodPost, "/cq/login", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(guard)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
@@ -539,8 +562,15 @@ func TestSessionGrantsAccessAndSignOut(t *testing.T) {
 		t.Error("GET /cq/jobs with session: no sign-out offered")
 	}
 
-	// Signing out clears the cookie. It is a state change, so it needs CSRF.
-	form := url.Values{"csrf": {handler.csrf}}
+	// Signing out clears the cookie. It is a state change, so it needs the
+	// session's own token, not a process-wide one.
+	tokenReq := httptest.NewRequest(http.MethodGet, "/cq/", nil)
+	tokenReq.AddCookie(cookie)
+	token, ok := handler.csrfFor(tokenReq)
+	if !ok {
+		t.Fatal("csrfFor: no token for a signed-in operator")
+	}
+	form := url.Values{"csrf": {token}}
 	out := httptest.NewRequest(http.MethodPost, "/cq/logout", strings.NewReader(form.Encode()))
 	out.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	out.AddCookie(cookie)
@@ -549,6 +579,14 @@ func TestSessionGrantsAccessAndSignOut(t *testing.T) {
 	cleared := rec.Result().Cookies()
 	if len(cleared) == 0 || cleared[0].MaxAge >= 0 {
 		t.Error("POST /cq/logout: session cookie was not cleared")
+	}
+	// Clearing the browser's copy is not signing out. Replay the old cookie.
+	replay := httptest.NewRequest(http.MethodGet, "/cq/jobs", nil)
+	replay.AddCookie(cookie)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, replay)
+	if rec.Code != http.StatusSeeOther {
+		t.Errorf("replaying a signed-out session: got %d, want a redirect to login", rec.Code)
 	}
 }
 
@@ -576,7 +614,7 @@ func TestExpiredSessionIsRejected(t *testing.T) {
 	handler, _ := newLoginHarness(t)
 
 	// Correctly signed, but already expired.
-	expired := handler.signSession("ops", time.Now().Add(-time.Minute))
+	expired := handler.signSession("ops", "sid", time.Now().Add(-time.Minute))
 	req := httptest.NewRequest(http.MethodGet, "/cq/jobs", nil)
 	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: expired})
 	rec := httptest.NewRecorder()
@@ -590,10 +628,15 @@ func TestExpiredSessionIsRejected(t *testing.T) {
 func TestLoginOnlyRedirectsWithinTheDashboard(t *testing.T) {
 	handler, _ := newLoginHarness(t)
 
-	for _, next := range []string{"https://evil.example/steal", "//evil.example/steal", "/elsewhere"} {
-		form := url.Values{"username": {"ops"}, "password": {"hunter2"}, "next": {next}}
+	for _, next := range []string{
+		"https://evil.example/steal", "//evil.example/steal", "/elsewhere",
+		`/\evil.example/steal`, `/\/evil.example`, "/cq/../elsewhere",
+	} {
+		guard, token := loginToken(t, handler)
+		form := url.Values{"username": {"ops"}, "password": {"hunter2"}, "next": {next}, "csrf": {token}}
 		req := httptest.NewRequest(http.MethodPost, "/cq/login", strings.NewReader(form.Encode()))
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.AddCookie(guard)
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, req)
 		if loc := rec.Header().Get("Location"); loc != "/cq/" {
@@ -694,5 +737,226 @@ func TestPagerFreezesTheWindow(t *testing.T) {
 	body := get(t, handler, "/cq/jobs")
 	if !strings.Contains(body, "before=") {
 		t.Fatal("GET /cq/jobs: pager link does not freeze the window")
+	}
+}
+
+// Regressions for the security review of login.go.
+
+// Signing out must end the session server side, not just in the browser.
+func TestLogoutRevokesTheSession(t *testing.T) {
+	handler, _ := newLoginHarness(t)
+	cookie := signIn(t, handler, "ops", "hunter2")
+
+	tokenReq := httptest.NewRequest(http.MethodGet, "/cq/", nil)
+	tokenReq.AddCookie(cookie)
+	token, _ := handler.csrfFor(tokenReq)
+
+	form := url.Values{"csrf": {token}}
+	out := httptest.NewRequest(http.MethodPost, "/cq/logout", strings.NewReader(form.Encode()))
+	out.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	out.AddCookie(cookie)
+	handler.ServeHTTP(httptest.NewRecorder(), out)
+
+	// The captured cookie is still perfectly well signed and unexpired.
+	replay := httptest.NewRequest(http.MethodGet, "/cq/jobs", nil)
+	replay.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, replay)
+	if rec.Code != http.StatusSeeOther {
+		t.Errorf("replayed session after logout: got %d, want a redirect", rec.Code)
+	}
+}
+
+// An anonymous caller must never be handed the CSRF token.
+func TestCSRFTokenIsNotPublic(t *testing.T) {
+	handler, _, _ := newControlHarness(t) // Controls behind a bearer token, views open.
+
+	for _, path := range []string{"/cq/", "/cq/partials/live"} {
+		body := get(t, handler, path)
+		if strings.Contains(body, `name="csrf"`) {
+			t.Errorf("GET %s anonymously: rendered a csrf token", path)
+		}
+	}
+
+	// And the scraped-token attack fails end to end.
+	rec := post(handler, "/cq/control/pause", url.Values{"queue": {"demo"}, "csrf": {handler.csrf}}, "")
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("POST pause with a scraped token: got %d, want 401", rec.Code)
+	}
+}
+
+// Two operators must not share one token, and it must die with the session.
+func TestCSRFTokenIsPerSession(t *testing.T) {
+	handler, _ := newLoginHarness(t)
+
+	first := signIn(t, handler, "ops", "hunter2")
+	second := signIn(t, handler, "ops", "hunter2")
+
+	tokenFor := func(cookie *http.Cookie) string {
+		req := httptest.NewRequest(http.MethodGet, "/cq/", nil)
+		req.AddCookie(cookie)
+		token, _ := handler.csrfFor(req)
+		return token
+	}
+	if tokenFor(first) == tokenFor(second) {
+		t.Error("csrfFor: two sessions share one token")
+	}
+	if tokenFor(first) == handler.csrf {
+		t.Error("csrfFor: session token is the process-wide token")
+	}
+
+	// One session's token must not authorize another's request.
+	form := url.Values{"queue": {"demo"}, "csrf": {tokenFor(second)}}
+	req := httptest.NewRequest(http.MethodPost, "/cq/control/pause", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(first)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("cross-session token: got %d, want 403", rec.Code)
+	}
+}
+
+// The login form is itself a state change, so it needs a token.
+func TestLoginFormRequiresItsOwnToken(t *testing.T) {
+	handler, _ := newLoginHarness(t)
+
+	form := url.Values{"username": {"ops"}, "password": {"hunter2"}}
+	req := httptest.NewRequest(http.MethodPost, "/cq/login", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("POST /cq/login without a token: got %d, want 403", rec.Code)
+	}
+	for _, cookie := range rec.Result().Cookies() {
+		if cookie.Name == sessionCookie && cookie.Value != "" {
+			t.Error("POST /cq/login without a token: a session was started anyway")
+		}
+	}
+}
+
+// Credentials must not be accepted from the URL, where logs would keep them.
+func TestCredentialsRejectedFromQueryString(t *testing.T) {
+	handler, _ := newLoginHarness(t)
+	guard, token := loginToken(t, handler)
+
+	req := httptest.NewRequest(http.MethodPost,
+		"/cq/login?username=ops&password=hunter2&csrf="+token, nil)
+	req.AddCookie(guard)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	for _, cookie := range rec.Result().Cookies() {
+		if cookie.Name == sessionCookie && cookie.Value != "" {
+			t.Fatal("credentials in the query string started a session")
+		}
+	}
+}
+
+// A shadowing cookie must not lock an operator out.
+func TestShadowingCookieDoesNotLockOut(t *testing.T) {
+	handler, _ := newLoginHarness(t)
+	cookie := signIn(t, handler, "ops", "hunter2")
+
+	req := httptest.NewRequest(http.MethodGet, "/cq/jobs", nil)
+	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: "garbage.from.a.sibling"})
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("valid cookie behind a garbage one: got %d, want 200", rec.Code)
+	}
+}
+
+// A PasswordCheck returning an empty subject must not mint a session.
+func TestEmptySubjectIsRefused(t *testing.T) {
+	st, err := sqlite.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open(): %v", err)
+	}
+	defer st.Close()
+	sk := sink.New(st)
+	if _, err := sk.Start(context.Background()); err != nil {
+		t.Fatalf("Start(): %v", err)
+	}
+	defer sk.Close()
+
+	handler, err := New("/cq", st, sk, WithLogin(
+		func(string, string) (string, bool) { return "", true }, []byte("secret"), time.Hour))
+	if err != nil {
+		t.Fatalf("New(): %v", err)
+	}
+
+	guard, token := loginToken(t, handler)
+	form := url.Values{"username": {"ops"}, "password": {"pw"}, "csrf": {token}}
+	req := httptest.NewRequest(http.MethodPost, "/cq/login", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(guard)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code == http.StatusSeeOther {
+		t.Error("an empty subject was accepted, minting a session with no operator")
+	}
+}
+
+// Password guessing must not be unbounded.
+func TestLoginRateLimited(t *testing.T) {
+	handler, _ := newLoginHarness(t)
+
+	limited := false
+	for range loginBurst + 5 {
+		guard, token := loginToken(t, handler)
+		form := url.Values{"username": {"ops"}, "password": {"wrong"}, "csrf": {token}}
+		req := httptest.NewRequest(http.MethodPost, "/cq/login", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.AddCookie(guard)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code == http.StatusTooManyRequests {
+			limited = true
+			break
+		}
+	}
+	if !limited {
+		t.Errorf("no rate limiting after %d failed attempts", loginBurst+5)
+	}
+}
+
+// Authenticated pages must not be cached by a proxy or the back button.
+func TestPagesAreNotCacheable(t *testing.T) {
+	handler, _ := newLoginHarness(t)
+	cookie := signIn(t, handler, "ops", "hunter2")
+
+	req := httptest.NewRequest(http.MethodGet, "/cq/jobs", nil)
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if cache := rec.Header().Get("Cache-Control"); !strings.Contains(cache, "no-store") {
+		t.Errorf("Cache-Control: got %q, want no-store", cache)
+	}
+}
+
+// Behind a TLS-terminating proxy the cookie must still be marked Secure.
+func TestSecureCookieBehindProxy(t *testing.T) {
+	handler, _ := newLoginHarness(t)
+	guard, token := loginToken(t, handler)
+
+	form := url.Values{"username": {"ops"}, "password": {"hunter2"}, "csrf": {token}}
+	req := httptest.NewRequest(http.MethodPost, "/cq/login", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("X-Forwarded-Proto", "https")
+	req.AddCookie(guard)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	for _, cookie := range rec.Result().Cookies() {
+		if cookie.Name == sessionCookie && !cookie.Secure {
+			t.Error("session cookie behind an https proxy: Secure not set")
+		}
 	}
 }

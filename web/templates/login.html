@@ -87,6 +87,7 @@ button:hover { filter: brightness(1.08); }
 	<p class="sub">Sign in to view queue history.</p>
 	{{if .Error}}<p class="error">{{.Error}}</p>{{end}}
 	<input type="hidden" name="next" value="{{.Next}}">
+	<input type="hidden" name="csrf" value="{{.CSRF}}">
 	<label for="username">Username</label>
 	<input id="username" name="username" autocomplete="username" autofocus required>
 	<label for="password">Password</label>

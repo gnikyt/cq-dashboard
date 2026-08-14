@@ -157,8 +157,19 @@ http.Handle("/cq/", handler)
 
 Every route then redirects to a login form until the visitor signs in, and the
 session rides in an HttpOnly, SameSite=Lax cookie signed with your secret. The
-top bar shows who is signed in and offers a sign-out. Rotating the secret logs
-everyone out.
+top bar shows who is signed in and offers a sign-out, which revokes the session
+server side rather than only deleting the browser's copy. Rotating the secret
+logs everyone out.
+
+Behind a TLS-terminating proxy `r.TLS` is nil, so the Secure flag is inferred
+from `X-Forwarded-Proto`. Set it explicitly in production:
+
+```go
+web.WithSecureCookies(true)
+```
+
+Failed logins are rate limited per client address and audited with the
+attempted username, so a run of guesses is visible rather than silent.
 
 This is a form rather than HTTP basic auth on purpose: basic auth depends on
 the browser's native dialog, which cannot be styled, has no sign-out, and does

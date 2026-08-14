@@ -56,13 +56,39 @@ func newCSRFToken() (string, error) {
 	return hex.EncodeToString(buf), nil
 }
 
-// checkCSRF reports whether a control request carries this handler's token.
+// csrfFor returns the token this request should carry, and whether the caller
+// is entitled to see one at all.
 //
-// The token is rendered only into authorized pages, so a cross-site form post
-// cannot supply it. Compared in constant time.
+// With a login configured the token is derived from the session, so it differs
+// per operator and dies with the session rather than living as long as the
+// process. Otherwise it falls back to the per-process token, which is only
+// ever rendered for an authorized request.
+func (h *Handler) csrfFor(r *http.Request) (string, bool) {
+	if h.login != nil {
+		found, ok := h.sessionFrom(r)
+		if !ok {
+			return "", false
+		}
+		return h.sign("csrf:" + found.ID), true
+	}
+	if h.auth == nil {
+		return "", false
+	}
+	if _, ok := h.auth(r); !ok {
+		return "", false
+	}
+	return h.csrf, true
+}
+
+// checkCSRF reports whether a state-changing request carries the right token.
+// Read from the body only: a token accepted from the query string would weaken
+// the double-submit story. Compared in constant time.
 func (h *Handler) checkCSRF(r *http.Request) bool {
-	got := r.FormValue("csrf")
-	return subtle.ConstantTimeCompare([]byte(got), []byte(h.csrf)) == 1
+	want, ok := h.csrfFor(r)
+	if !ok {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(r.PostFormValue("csrf")), []byte(want)) == 1
 }
 
 // authorize accepts either a signed session or the configured Authorizer,
