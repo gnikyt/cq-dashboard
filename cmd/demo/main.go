@@ -37,7 +37,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("open store: %v", err)
 	}
-	defer st.Close()
+	defer st.Close() //nolint:errcheck // Demo teardown, nothing to recover.
 
 	sk := sink.New(st,
 		sink.WithErrorHandler(func(err error) {

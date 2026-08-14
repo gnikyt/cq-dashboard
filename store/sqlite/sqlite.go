@@ -136,7 +136,7 @@ func (s *Store) UpsertJobs(ctx context.Context, jobs []store.Job) error {
 	if err != nil {
 		return fmt.Errorf("sqlite: upsert jobs: %w", err)
 	}
-	defer stmt.Close()
+	defer stmt.Close() //nolint:errcheck // Statement close cannot fail usefully here.
 
 	for _, job := range jobs {
 		attrs := "{}"
@@ -184,7 +184,7 @@ func (s *Store) SaveAttempts(ctx context.Context, attempts []store.Attempt) erro
 	if err != nil {
 		return fmt.Errorf("sqlite: save attempts: %w", err)
 	}
-	defer stmt.Close()
+	defer stmt.Close() //nolint:errcheck // Statement close cannot fail usefully here.
 
 	for _, attempt := range attempts {
 		if _, err := stmt.ExecContext(ctx,
@@ -290,7 +290,7 @@ func (s *Store) Jobs(ctx context.Context, filter store.Filter) ([]store.Job, err
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: jobs: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck // Read errors surface through rows.Err.
 
 	var jobs []store.Job
 	for rows.Next() {
@@ -318,7 +318,7 @@ func (s *Store) Job(ctx context.Context, key string) (store.Job, []store.Attempt
 	if err != nil {
 		return store.Job{}, nil, fmt.Errorf("sqlite: job attempts: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck // Read errors surface through rows.Err.
 
 	var attempts []store.Attempt
 	for rows.Next() {
@@ -350,7 +350,7 @@ func (s *Store) Lineage(ctx context.Context, epoch string, rootID string) ([]sto
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: lineage: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck // Read errors surface through rows.Err.
 
 	var jobs []store.Job
 	for rows.Next() {
@@ -369,7 +369,7 @@ func (s *Store) Counts(ctx context.Context) (store.Counts, error) {
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: counts: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck // Read errors surface through rows.Err.
 
 	counts := store.Counts{}
 	for rows.Next() {
@@ -469,7 +469,7 @@ func (s *Store) GroupJobs(ctx context.Context, filter store.Filter, limit int) (
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: group jobs: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck // Read errors surface through rows.Err.
 
 	var groups []store.Group
 	for rows.Next() {
@@ -529,7 +529,7 @@ func (s *Store) Timeline(ctx context.Context, since time.Time, bucket time.Durat
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: timeline: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck // Read errors surface through rows.Err.
 
 	seen := map[int64]store.Bucket{}
 	for rows.Next() {
@@ -573,7 +573,7 @@ func (s *Store) AttributeKeys(ctx context.Context, limit int) ([]string, error) 
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: attribute keys: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck // Read errors surface through rows.Err.
 
 	var keys []string
 	for rows.Next() {

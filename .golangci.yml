@@ -1,0 +1,21 @@
+# golangci-lint v2 configuration.
+#
+# The linter binary must be built with a Go at least as new as this module's
+# go directive, so CI installs it with the repo's own toolchain rather than
+# taking a prebuilt release.
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: standard
+  exclusions:
+    paths:
+      - example
+    rules:
+      # Tests exercise failure paths and fixtures, where unchecked errors and
+      # long functions are the point.
+      - path: _test\.go$
+        linters:
+          - errcheck
