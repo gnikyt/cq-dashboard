@@ -106,6 +106,10 @@ func TestConformance(t *testing.T) {
 }
 ```
 
+Check a new backend against `store/memory` as well as SQLite: if the two
+implementations disagree, the contract is underspecified and the suite needs
+the case, not the driver.
+
 The suite is the specification. It pins the semantics that are easy to get
 subtly wrong and impossible to notice by eye: out-of-order events merging
 without regressing state, epoch isolation for cq's per-process job IDs,

@@ -8,16 +8,13 @@ import (
 	"time"
 
 	"github.com/gnikyt/cq-dashboard/store"
-	"github.com/gnikyt/cq-dashboard/store/sqlite"
+	"github.com/gnikyt/cq-dashboard/store/memory"
 	cq "github.com/gnikyt/cq/v2"
 )
 
-func newSink(t *testing.T, opts ...Option) (*Sink, *sqlite.Store) {
+func newSink(t *testing.T, opts ...Option) (*Sink, *memory.Store) {
 	t.Helper()
-	st, err := sqlite.Open(":memory:")
-	if err != nil {
-		t.Fatalf("Open(): %v", err)
-	}
+	st := memory.Open()
 	opts = append([]Option{WithFlushTick(10 * time.Millisecond)}, opts...)
 	sk := New(st, opts...)
 	if _, err := sk.Start(context.Background()); err != nil {
@@ -224,10 +221,7 @@ func TestSinkRecordsProgress(t *testing.T) {
 
 // The sink sheds load rather than blocking a worker.
 func TestSinkDropsRatherThanBlocking(t *testing.T) {
-	st, err := sqlite.Open(":memory:")
-	if err != nil {
-		t.Fatalf("Open(): %v", err)
-	}
+	st := memory.Open()
 	defer st.Close()
 
 	// Buffer of 1 with no writer running: every extra offer must be dropped,
@@ -245,10 +239,7 @@ func TestSinkDropsRatherThanBlocking(t *testing.T) {
 
 // A failed Start must not consume the one chance to start.
 func TestStartCanBeRetriedAfterFailure(t *testing.T) {
-	st, err := sqlite.Open(":memory:")
-	if err != nil {
-		t.Fatalf("Open(): %v", err)
-	}
+	st := memory.Open()
 	defer st.Close()
 
 	broken := &flakyStore{Store: st, fail: true}
@@ -276,10 +267,7 @@ func TestStartCanBeRetriedAfterFailure(t *testing.T) {
 
 // Close must not hang when the writer was never launched.
 func TestCloseWithoutStartReturns(t *testing.T) {
-	st, err := sqlite.Open(":memory:")
-	if err != nil {
-		t.Fatalf("Open(): %v", err)
-	}
+	st := memory.Open()
 	defer st.Close()
 
 	sk := New(st)
@@ -297,10 +285,7 @@ func TestCloseWithoutStartReturns(t *testing.T) {
 
 // A write the store rejected must not count as recorded.
 func TestWrittenExcludesFailedWrites(t *testing.T) {
-	st, err := sqlite.Open(":memory:")
-	if err != nil {
-		t.Fatalf("Open(): %v", err)
-	}
+	st := memory.Open()
 	defer st.Close()
 
 	broken := &flakyStore{Store: st}

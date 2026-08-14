@@ -258,6 +258,12 @@ suite it must pass... the same 19 cases the SQLite driver runs, covering the
 semantics rather than the SQL: out-of-order merges, epoch isolation, lineage
 scoping, prune boundaries, frozen pagination windows.
 
+`store/memory` is the reference implementation: no database, no dependencies,
+and it passes the same suite. It is what this module's own tests run against,
+and it doubles as a fixture for testing application code that reads the store.
+It keeps nothing across a restart, which is the one thing the dashboard exists
+to do, so it is not a deployment option.
+
 Two things to know before pointing several processes at one shared database:
 `ReconcileEpoch` currently marks every *other* epoch's unfinished jobs as
 interrupted, which is right for one process restarting and wrong for two

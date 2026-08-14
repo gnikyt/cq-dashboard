@@ -12,7 +12,7 @@ import (
 
 	"github.com/gnikyt/cq-dashboard/sink"
 	"github.com/gnikyt/cq-dashboard/store"
-	"github.com/gnikyt/cq-dashboard/store/sqlite"
+	"github.com/gnikyt/cq-dashboard/store/memory"
 	cq "github.com/gnikyt/cq/v2"
 )
 
@@ -21,10 +21,7 @@ import (
 func newHarness(t *testing.T) (*Handler, *cq.Queue, *cq.Scheduler, *sink.Sink) {
 	t.Helper()
 
-	st, err := sqlite.Open(":memory:")
-	if err != nil {
-		t.Fatalf("Open(): %v", err)
-	}
+	st := memory.Open()
 	sk := sink.New(st, sink.WithFlushTick(10*time.Millisecond))
 	if _, err := sk.Start(context.Background()); err != nil {
 		t.Fatalf("Start(): %v", err)

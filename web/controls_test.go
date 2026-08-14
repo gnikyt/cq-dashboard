@@ -14,7 +14,7 @@ import (
 
 	"github.com/gnikyt/cq-dashboard/sink"
 	"github.com/gnikyt/cq-dashboard/store"
-	"github.com/gnikyt/cq-dashboard/store/sqlite"
+	"github.com/gnikyt/cq-dashboard/store/memory"
 	cq "github.com/gnikyt/cq/v2"
 )
 
@@ -42,10 +42,7 @@ func (a *auditLog) all() []AuditEntry {
 func newControlHarness(t *testing.T, opts ...Option) (*Handler, *cq.Queue, *auditLog) {
 	t.Helper()
 
-	st, err := sqlite.Open(":memory:")
-	if err != nil {
-		t.Fatalf("Open(): %v", err)
-	}
+	st := memory.Open()
 	sk := sink.New(st, sink.WithFlushTick(10*time.Millisecond))
 	if _, err := sk.Start(context.Background()); err != nil {
 		t.Fatalf("Start(): %v", err)
@@ -102,10 +99,7 @@ func post(handler *Handler, path string, form url.Values, token string) *httptes
 }
 
 func TestControlsRequireAuthorizer(t *testing.T) {
-	st, err := sqlite.Open(":memory:")
-	if err != nil {
-		t.Fatalf("Open(): %v", err)
-	}
+	st := memory.Open()
 	defer st.Close()
 	sk := sink.New(st)
 
@@ -379,10 +373,7 @@ func TestRequireAuthWithNilAuthorizerDenies(t *testing.T) {
 
 // One Authorizer can cover both the views and the controls.
 func TestSharedAuthorizerCoversViewsAndControls(t *testing.T) {
-	st, err := sqlite.Open(":memory:")
-	if err != nil {
-		t.Fatalf("Open(): %v", err)
-	}
+	st := memory.Open()
 	defer st.Close()
 	sk := sink.New(st, sink.WithFlushTick(10*time.Millisecond))
 	if _, err := sk.Start(context.Background()); err != nil {
@@ -432,10 +423,7 @@ func TestSharedAuthorizerCoversViewsAndControls(t *testing.T) {
 // newLoginHarness wires a handler behind the login form.
 func newLoginHarness(t *testing.T) (*Handler, *cq.Queue) {
 	t.Helper()
-	st, err := sqlite.Open(":memory:")
-	if err != nil {
-		t.Fatalf("Open(): %v", err)
-	}
+	st := memory.Open()
 	sk := sink.New(st, sink.WithFlushTick(10*time.Millisecond))
 	if _, err := sk.Start(context.Background()); err != nil {
 		t.Fatalf("Start(): %v", err)
@@ -677,10 +665,7 @@ func TestSessionAuthorizesControls(t *testing.T) {
 
 // A misconfigured login must fail loudly, not serve the dashboard publicly.
 func TestIncompleteLoginIsRefused(t *testing.T) {
-	st, err := sqlite.Open(":memory:")
-	if err != nil {
-		t.Fatalf("Open(): %v", err)
-	}
+	st := memory.Open()
 	defer st.Close()
 	sk := sink.New(st)
 
@@ -873,10 +858,7 @@ func TestShadowingCookieDoesNotLockOut(t *testing.T) {
 
 // A PasswordCheck returning an empty subject must not mint a session.
 func TestEmptySubjectIsRefused(t *testing.T) {
-	st, err := sqlite.Open(":memory:")
-	if err != nil {
-		t.Fatalf("Open(): %v", err)
-	}
+	st := memory.Open()
 	defer st.Close()
 	sk := sink.New(st)
 	if _, err := sk.Start(context.Background()); err != nil {
