@@ -1,0 +1,31 @@
+{{define "live.html"}}
+<div class="panel">
+	<div class="panel-head">
+		<h2>Queues</h2>
+		<span class="hint">live from cq</span>
+	</div>
+	<div class="scroll">{{template "queues.html" .}}</div>
+	{{if .Controls.CSRF}}
+	<details class="disclose">
+		<summary>Controls</summary>
+		{{template "controls.html" .Controls}}
+	</details>
+	{{end}}
+</div>
+
+<div class="panel">
+	<div class="panel-head">
+		<h2>In flight</h2>
+		<span class="count-pill">{{len .Pending}}</span>
+		<span class="hint">accepted, not finished</span>
+	</div>
+	<div class="scroll framed">{{template "pending.html" .}}</div>
+</div>
+
+<div class="panel">
+	<div class="panel-head">
+		<h2>Schedules</h2>
+	</div>
+	<div class="scroll">{{template "schedules.html" .}}</div>
+</div>
+{{end}}

@@ -1,0 +1,24 @@
+{{define "filters"}}
+<form class="filters" method="get" action="{{.Action}}">
+	{{if .Grouped}}<input type="hidden" name="view" value="list">{{end}}
+	<input type="search" name="q" placeholder="Search ID or name" value="{{.Filter.Search}}" aria-label="Search by ID or name">
+	{{$queue := .Filter.Queue}}
+	<select name="queue" aria-label="Filter by queue">
+		<option value="">All queues</option>
+		{{range .Queues}}<option value="{{.}}" {{if eq . $queue}}selected{{end}}>{{.}}</option>{{end}}
+		{{if and $queue (not .Queues)}}<option value="{{$queue}}" selected>{{$queue}}</option>{{end}}
+	</select>
+	<input list="attr-keys" type="text" name="attr" placeholder="Attribute" value="{{.Filter.AttrKey}}" aria-label="Filter by attribute key">
+	<datalist id="attr-keys">{{range .AttrKeys}}<option value="{{.}}"></option>{{end}}</datalist>
+	<input type="text" name="value" placeholder="Value" value="{{.Filter.AttrValue}}" aria-label="Attribute value">
+	{{if .ShowStates}}
+	<select name="state" aria-label="Filter by state">
+		<option value="">Any state</option>
+		{{$current := .State}}
+		{{range .States}}<option value="{{.}}" {{if eq . $current}}selected{{end}}>{{.}}</option>{{end}}
+	</select>
+	{{end}}
+	<button class="btn" data-variant="primary" type="submit">Filter</button>
+	{{if .Filter.Active}}<a class="btn" href="{{.Action}}">Clear</a>{{end}}
+</form>
+{{end}}

@@ -1,0 +1,50 @@
+{{define "controls.html"}}
+	<div class="scroll">
+		<table>
+			<thead><tr><th>Queue</th><th>State</th><th>Execution</th><th>Worker range</th></tr></thead>
+			<tbody>
+			{{$csrf := .CSRF}}
+			{{range .Queues}}
+				<tr>
+					<td><strong>{{.Name}}</strong></td>
+					<td>
+						{{if .Paused}}<span class="badge" data-group="dropped">paused</span>
+						{{else}}<span class="badge" data-group="done">running</span>{{end}}
+					</td>
+					<td>
+						{{if .Paused}}
+						<form class="inline-form" method="post" action="{{prefix}}/control/resume">
+							<input type="hidden" name="csrf" value="{{$csrf}}">
+							<input type="hidden" name="queue" value="{{.Name}}">
+							<button class="btn" data-variant="primary" type="submit">Resume</button>
+						</form>
+						{{else}}
+						<form class="inline-form" method="post" action="{{prefix}}/control/pause">
+							<input type="hidden" name="csrf" value="{{$csrf}}">
+							<input type="hidden" name="queue" value="{{.Name}}">
+							<button class="btn" type="submit">Pause</button>
+						</form>
+						{{end}}
+					</td>
+					<td>
+						<form class="inline-form" method="post" action="{{prefix}}/control/workers">
+							<input type="hidden" name="csrf" value="{{$csrf}}">
+							<input type="hidden" name="queue" value="{{.Name}}">
+							<input type="number" name="min" value="{{.Min}}" min="0" aria-label="Minimum workers for {{.Name}}">
+							<span class="muted">to</span>
+							<input type="number" name="max" value="{{.Max}}" min="0" aria-label="Maximum workers for {{.Name}}">
+							<button class="btn" type="submit">Apply</button>
+						</form>
+					</td>
+				</tr>
+			{{else}}
+				<tr><td colspan="4"><div class="empty"><strong>No queues registered</strong>Nothing to control.</div></td></tr>
+			{{end}}
+			</tbody>
+		</table>
+	</div>
+	<p class="panel-foot">
+		Acts on the running queue.
+		<a href="{{prefix}}/reference#boundaries">What is and isn't offered</a>.
+	</p>
+{{end}}

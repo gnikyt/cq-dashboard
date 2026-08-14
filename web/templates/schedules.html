@@ -1,0 +1,26 @@
+{{define "schedules.html"}}
+<table>
+	<thead>
+		<tr><th>Schedule</th><th>Kind</th><th>Every / at</th><th class="num">Next fire</th><th class="num">Fired</th><th>Last error</th></tr>
+	</thead>
+	<tbody>
+	{{range .Schedules}}
+		<tr>
+			<td><strong>{{.ID}}</strong></td>
+			<td><span class="tag">{{.Kind}}</span></td>
+			<td class="mono muted">
+				{{if .Interval}}every {{dur .Interval}}
+				{{else if not .RunAt.IsZero}}at {{clock .RunAt}}
+				{{else if not .NextFireAt.IsZero}}at {{clock .NextFireAt}}
+				{{else}}—{{end}}
+			</td>
+			<td class="num mono">{{until .NextFireAt}}</td>
+			<td class="num">{{.Submissions}}</td>
+			<td class="err">{{if .LastErr}}{{.LastErr}}{{end}}</td>
+		</tr>
+	{{else}}
+		<tr><td colspan="6"><div class="empty"><strong>No schedules</strong>Register a scheduler with web.WithSchedulers to see recurring work here.</div></td></tr>
+	{{end}}
+	</tbody>
+</table>
+{{end}}

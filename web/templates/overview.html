@@ -1,0 +1,77 @@
+{{define "overview.html"}}
+{{template "head" .}}
+
+{{if .Controls.Notice}}<p class="notice" data-tone="ok">{{.Controls.Notice}}</p>{{end}}
+{{if .Controls.Error}}<p class="notice" data-tone="bad">{{.Controls.Error}}</p>{{end}}
+
+<dl class="rail">
+	{{range .Rail}}
+	{{if .Href}}<a class="stat" href="{{.Href}}" data-tone="{{.Tone}}">{{else}}<div class="stat" data-tone="{{.Tone}}">{{end}}
+		<dt>{{.Label}}</dt>
+		<dd>{{.Value}}<span class="sub">{{.Sub}}</span></dd>
+	{{if .Href}}</a>{{else}}</div>{{end}}
+	{{end}}
+</dl>
+
+<div class="panel">
+	<div class="panel-head">
+		<h2>Throughput</h2>
+		<span class="hint">{{.Timeline.Window}}, per minute</span>
+		<span class="push"></span>
+		<span class="hint" id="spark-readout"><b class="mono">{{.Timeline.Completed}}</b> completed · <b class="mono">{{.Timeline.Failed}}</b> failed</span>
+	</div>
+	{{if .Timeline.Bars}}
+	<div class="spark">
+		{{range .Timeline.Bars}}
+		<span class="bar" data-readout="{{.Label}}" title="{{.Label}}">
+			<i class="bad" style="height:{{.FailedPct}}%"></i>
+			<i class="done" style="height:{{.CompletedPct}}%"></i>
+		</span>
+		{{end}}
+	</div>
+	{{else}}
+	<div class="empty"><strong>No completed work yet</strong>Finished jobs appear here minute by minute.</div>
+	{{end}}
+</div>
+
+<div id="live">{{template "live.html" .}}</div>
+
+<p class="ledger">
+	<span>history: <b>{{.Written}}</b> events recorded</span>
+	<span>{{if .Dropped}}<b class="warn">{{.Dropped}}</b> dropped, so history has gaps{{else}}<b>0</b> dropped{{end}}</span>
+	<span><b>{{.Pruned}}</b> pruned by retention</span>
+	<span>this process: <b>{{.Epoch}}</b></span>
+</p>
+
+<script>
+// Hovering a bar reports that minute in the panel header. A native title
+// tooltip needs a second of stationary hover and is easy to miss entirely.
+(() => {
+	const readout = document.getElementById("spark-readout");
+	if (!readout) { return; }
+	const summary = readout.innerHTML;
+	document.querySelectorAll(".spark .bar").forEach((bar) => {
+		bar.addEventListener("mouseenter", () => { readout.textContent = bar.dataset.readout; });
+		bar.addEventListener("mouseleave", () => { readout.innerHTML = summary; });
+	});
+})();
+
+// Refresh only the live region... history changes slowly and a full reload
+// would lose scroll position and any in-progress form entry.
+setInterval(async () => {
+	const live = document.getElementById("live");
+	// Never swap out from under someone using the controls inside this region.
+	if (live.contains(document.activeElement) || document.hidden) { return; }
+	const wasOpen = live.querySelector("details.disclose")?.open;
+	try {
+		const res = await fetch("{{prefix}}/partials/live");
+		if (!res.ok) { return; }
+		live.innerHTML = await res.text();
+		const disclosure = live.querySelector("details.disclose");
+		if (disclosure && wasOpen) { disclosure.open = true; }
+	} catch (e) { /* transient: the next tick retries */ }
+}, 2000);
+</script>
+
+{{template "foot" .}}
+{{end}}

@@ -1,0 +1,32 @@
+{{define "queues.html"}}
+<table>
+	<thead>
+		<tr>
+			<th>Queue</th><th>State</th><th>Workers</th><th class="num" title="Jobs accepted but not yet started, against buffer capacity">Buffer</th>
+			<th class="num">Active</th><th class="num">Done</th><th class="num">Failed</th>
+			<th class="num">Discarded</th><th class="num">Cancelled</th>
+		</tr>
+	</thead>
+	<tbody>
+	{{range .Queues}}{{with .Stats}}
+		<tr>
+			<td><strong>{{if .Name}}{{.Name}}{{else}}unnamed{{end}}</strong></td>
+			<td>
+				{{if .Stopped}}<span class="badge" data-group="failed">stopped</span>
+				{{else if .Paused}}<span class="badge" data-group="dropped">paused</span>
+				{{else}}<span class="badge" data-group="done">running</span>{{end}}
+			</td>
+			<td class="mono">{{.RunningWorkers}} / {{.IdleWorkers}} idle <span class="muted">({{.WorkersMin}}–{{.WorkersMax}})</span></td>
+			<td class="num" title="{{.PendingJobs}} waiting, buffer holds {{.Capacity}}">{{.PendingJobs}} / {{.Capacity}}</td>
+			<td class="num">{{.ActiveJobs}}</td>
+			<td class="num">{{.CompletedJobs}}</td>
+			<td class="num">{{.FailedJobs}}</td>
+			<td class="num">{{.DiscardedJobs}}</td>
+			<td class="num">{{.CancelledJobs}}</td>
+		</tr>
+	{{end}}{{else}}
+		<tr><td colspan="9"><div class="empty"><strong>No queues registered</strong>Pass web.WithQueues(queue) when creating the handler.</div></td></tr>
+	{{end}}
+	</tbody>
+</table>
+{{end}}

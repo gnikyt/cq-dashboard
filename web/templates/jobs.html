@@ -1,0 +1,56 @@
+{{define "jobs.html"}}
+{{template "head" .}}
+
+<h1>Jobs</h1>
+<p class="lede">Every execution cq recorded, newest first.</p>
+
+<div class="panel">
+	{{template "filters" dict
+		"Action" (printf "%s/jobs" prefix) "Filter" .Filter "AttrKeys" .AttrKeys "Queues" .Queues
+		"ShowStates" true "States" .States "State" .State "Grouped" false}}
+	<div class="scroll">
+		<table>
+			<thead>
+				<tr>
+					<th>ID</th><th>Job</th><th>Queue</th><th>State</th>
+					<th class="num">Enqueued</th><th class="num">Wait</th><th class="num">Run</th>
+					<th class="num">Attempts</th>
+				</tr>
+			</thead>
+			{{range .Jobs}}
+			<tbody class="row">
+				<tr>
+					<td class="mono"><a href="{{prefix}}/jobs/{{.Key}}">{{.ID}}</a></td>
+					<td>{{if .Name}}{{.Name}}{{else}}<span class="muted">unnamed</span>{{end}}</td>
+					<td class="muted">{{if .Queue}}{{.Queue}}{{else}}—{{end}}</td>
+					<td>{{template "badge" .State}}</td>
+					<td class="num muted">{{since .EnqueuedAt}}</td>
+					<td class="num mono">{{us .WaitUS}}</td>
+					<td class="num mono">{{us .ExecUS}}</td>
+					<td class="num mono tries" data-retried="{{gt .Attempt 0}}"
+						title="{{tries .Attempt}} execution attempts">{{tries .Attempt}}</td>
+				</tr>
+				{{$p := progress .}}
+				{{if or $p .Err}}
+				<tr class="detail">
+					<td colspan="8">
+						{{if $p}}<span class="label">progress</span>{{$p}}{{end}}
+						{{if and $p .Err}} · {{end}}
+						{{if .Err}}<span class="label">error</span><span class="bad">{{.Err}}</span>{{end}}
+					</td>
+				</tr>
+				{{end}}
+			</tbody>
+			{{else}}
+			<tbody>
+				<tr><td colspan="8"><div class="empty"><strong>No jobs match</strong>Adjust the filters, or wait for the queue to run something.</div></td></tr>
+			</tbody>
+			{{end}}
+		</table>
+	</div>
+	{{template "pager" .}}
+</div>
+
+{{template "refresh" .}}
+{{template "foot" .}}
+{{end}}

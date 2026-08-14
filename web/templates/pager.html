@@ -1,0 +1,11 @@
+{{define "pager"}}
+{{if .Jobs}}
+<p class="pager">
+	<span>Showing <b class="mono">{{.First}}–{{.Last}}</b> of <b class="mono">{{.Total}}</b></span>
+	<span class="push"></span>
+	{{if .HasPrev}}<a class="btn" href="{{.PrevURL}}">Previous</a>{{end}}
+	<span>Page {{.Page}} of {{.Pages}}</span>
+	{{if .HasNext}}<a class="btn" href="{{.NextURL}}">Next</a>{{end}}
+</p>
+{{end}}
+{{end}}

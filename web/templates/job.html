@@ -1,0 +1,93 @@
+{{define "job.html"}}
+{{template "head" .}}
+
+<h1>{{if .Job.Name}}{{.Job.Name}}{{else}}Job{{end}} <span class="mono muted">#{{.Job.ID}}</span></h1>
+<p class="lede">{{template "badge" .Job.State}} <span class="muted">on {{if .Job.Queue}}{{.Job.Queue}}{{else}}an unnamed queue{{end}}, enqueued {{since .Job.EnqueuedAt}}.</span></p>
+
+{{if .Job.Err}}<p class="notice" data-tone="bad">{{.Job.Err}}</p>{{end}}
+
+<div class="panel">
+	<div class="panel-head">
+		<h2>Submission timings</h2>
+		<span class="hint">the whole submission, including every retry and any backoff between them</span>
+	</div>
+	<div class="facts">
+		<div class="fact"><dt>Waited</dt><dd class="mono">{{us .Job.WaitUS}}</dd></div>
+		<div class="fact"><dt>Ran for</dt><dd class="mono">{{us .Job.ExecUS}}</dd></div>
+		<div class="fact"><dt>Attempts</dt><dd class="mono">{{if .Attempts}}{{len .Attempts}}{{else}}1{{end}}</dd></div>
+		<div class="fact"><dt>Progress</dt><dd>{{$p := progress .Job}}{{if $p}}{{$p}}{{else}}<span class="muted">none reported</span>{{end}}</dd></div>
+		<div class="fact"><dt>Started</dt><dd class="mono">{{clock .Job.StartedAt}}</dd></div>
+		<div class="fact"><dt>Finished</dt><dd class="mono">{{clock .Job.FinishedAt}}</dd></div>
+	</div>
+</div>
+
+{{if .Job.Attributes}}
+<div class="panel">
+	<div class="panel-head"><h2>Attributes</h2></div>
+	<div class="scroll">
+		<table>
+			<tbody>
+			{{range $key, $value := .Job.Attributes}}
+				<tr><td class="mono muted">{{$key}}</td><td class="mono">{{$value}}</td></tr>
+			{{end}}
+			</tbody>
+		</table>
+	</div>
+</div>
+{{end}}
+
+<div class="panel">
+	<div class="panel-head">
+		<h2>Attempts</h2>
+		<span class="hint">retries within this submission</span>
+	</div>
+	<div class="scroll">
+		<table>
+			<thead><tr><th class="num">#</th><th>Result</th><th class="num">Started</th><th>Error</th></tr></thead>
+			<tbody>
+			{{range .Attempts}}
+				<tr>
+					<td class="num mono">{{.Attempt}}</td>
+					<td>{{template "badge" .State}}</td>
+					<td class="num muted">{{since .StartedAt}}</td>
+					<td class="err">{{.Err}}</td>
+				</tr>
+			{{else}}
+				<tr><td colspan="4"><div class="empty"><strong>No retry attempts</strong>This job ran once, without a retry wrapper.</div></td></tr>
+			{{end}}
+			</tbody>
+		</table>
+	</div>
+</div>
+
+<div class="panel">
+	<div class="panel-head">
+		<h2>Lineage</h2>
+		<span class="hint">reschedule and release chain · root <span class="mono">{{.Job.RootID}}</span></span>
+	</div>
+	<div class="scroll">
+		<table>
+			<thead><tr><th>ID</th><th>State</th><th>From</th><th>Reason</th><th class="num">Enqueued</th></tr></thead>
+			<tbody>
+			{{range .Lineage}}
+				<tr>
+					<td class="mono">
+						{{if eq .ID $.Job.ID}}<strong>{{.ID}}</strong>
+						{{else}}<a href="{{prefix}}/jobs/{{.Key}}">{{.ID}}</a>{{end}}
+					</td>
+					<td>{{template "badge" .State}}</td>
+					<td class="mono muted">{{if .Parent}}{{.Parent}}{{else}}—{{end}}</td>
+					<td class="muted">{{$reason := index .Attributes "cq.reschedule.reason"}}{{if $reason}}{{$reason}}{{else}}—{{end}}</td>
+					<td class="num muted">{{since .EnqueuedAt}}</td>
+				</tr>
+			{{end}}
+			</tbody>
+		</table>
+	</div>
+	{{if eq (len .Lineage) 1}}
+	<div class="panel-foot">This job never rescheduled, so the chain is just itself.</div>
+	{{end}}
+</div>
+
+{{template "foot" .}}
+{{end}}

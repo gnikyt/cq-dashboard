@@ -1,0 +1,78 @@
+{{define "reference.html"}}
+{{template "head" .}}
+
+<h1>Reference</h1>
+<p class="lede">What each status means, and what this dashboard does and does not know.</p>
+
+<div class="panel">
+	<div class="panel-head">
+		<h2>Statuses</h2>
+		<span class="hint">badges are coloured by group, so nine states read as six ideas</span>
+	</div>
+	<div class="scroll">
+		<table>
+			<thead><tr><th>Status</th><th>Group</th><th>Emitted by</th><th>Meaning</th></tr></thead>
+			<tbody>
+			{{range .Statuses}}
+				<tr>
+					<td>{{template "badge" .State}}</td>
+					<td class="muted">{{.Group}}</td>
+					<td class="mono muted">{{.Source}}</td>
+					<td class="wrap">{{.Summary}}</td>
+				</tr>
+			{{end}}
+			</tbody>
+		</table>
+	</div>
+</div>
+
+<div class="panel" id="boundaries">
+	<div class="panel-head"><h2>What this dashboard is</h2></div>
+	<div class="facts stacked">
+		<div class="fact full">
+			<dt>It records what cq executed</dt>
+			<dd class="prose">
+				Queue lifecycle events are written to a local store as they happen. That
+				history survives restarts; the live panels on the overview do not, because
+				they are read from the running process on each request.
+			</dd>
+		</div>
+		<div class="fact full">
+			<dt>Failures are not a dead-letter queue</dt>
+			<dd class="prose">
+				If something feeds cq — SQS, a database poller, any transport — that system
+				owns the dead-letter queue and the redrive. The failures page shows the cq
+				executions that led there: the attempts, the errors, the timings.
+			</dd>
+		</div>
+		<div class="fact full">
+			<dt>In flight understates real backlog</dt>
+			<dd class="prose">
+				cq only knows about work already pulled into memory. Messages still waiting
+				on a transport are invisible here. This answers "what is this process doing",
+				not "how much work exists".
+			</dd>
+		</div>
+		<div class="fact full">
+			<dt>Dropped events mean incomplete history</dt>
+			<dd class="prose">
+				The recorder hands events to a buffered writer and never blocks a worker. If
+				that buffer fills, events are dropped and counted rather than slowing the
+				queue. A non-zero dropped count on the overview means history has gaps.
+			</dd>
+		</div>
+		{{if .Controls}}
+		<div class="fact full">
+			<dt>Controls are limited to reversible actions</dt>
+			<dd class="prose">
+				Pause, resume, and worker scaling only. Stopping and draining are not offered:
+				a stopped cq queue cannot be restarted in-process, so that belongs in a
+				deployment tool. Every attempt, including rejected ones, is audited.
+			</dd>
+		</div>
+		{{end}}
+	</div>
+</div>
+
+{{template "foot" .}}
+{{end}}

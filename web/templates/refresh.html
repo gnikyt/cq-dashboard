@@ -1,0 +1,11 @@
+{{define "refresh"}}
+<script>
+// History pages go stale silently otherwise. Reload in place, preserving the
+// query string, and skip it while a filter field has focus so typing is safe.
+setInterval(() => {
+	const tag = document.activeElement && document.activeElement.tagName;
+	if (tag === "INPUT" || tag === "SELECT" || document.hidden) { return; }
+	window.location.reload();
+}, 10000);
+</script>
+{{end}}

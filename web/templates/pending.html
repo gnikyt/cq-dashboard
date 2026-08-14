@@ -1,0 +1,23 @@
+{{define "pending.html"}}
+<table>
+	<thead>
+		<tr><th>ID</th><th>Job</th><th>Queue</th><th>State</th><th class="num">Waiting</th><th class="num">Attempt</th></tr>
+	</thead>
+	{{range .Pending}}
+	<tbody class="row">
+		<tr>
+			<td class="mono"><a href="{{prefix}}/jobs/{{.Key}}">{{.Submission.Meta.ID}}</a></td>
+			<td>{{if .Submission.Meta.Name}}{{.Submission.Meta.Name}}{{else}}<span class="muted">unnamed</span>{{end}}</td>
+			<td class="muted">{{if .Queue}}{{.Queue}}{{else}}unnamed{{end}}</td>
+			<td>{{template "badge" .State}}</td>
+			<td class="num muted">{{since .Submission.Meta.EnqueuedAt}}</td>
+			<td class="num">{{.Submission.Meta.Attempt}}</td>
+		</tr>
+	</tbody>
+	{{else}}
+	<tbody>
+		<tr><td colspan="6"><div class="empty"><strong>Nothing in flight</strong>Every accepted job has finished.</div></td></tr>
+	</tbody>
+	{{end}}
+</table>
+{{end}}
