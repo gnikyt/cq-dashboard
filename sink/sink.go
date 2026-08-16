@@ -25,6 +25,12 @@ const (
 	DefaultBuffer    = 4096
 	DefaultBatchSize = 200
 	DefaultFlushTick = 250 * time.Millisecond
+
+	// DefaultHeartbeat is how often this process tells the store it is alive,
+	// and DefaultStaleAfter how long silence means it is not. The gap allows
+	// several missed beats before a live process is declared dead.
+	DefaultHeartbeat  = 15 * time.Second
+	DefaultStaleAfter = 60 * time.Second
 )
 
 // Option configures a Sink.
@@ -64,6 +70,20 @@ func WithErrorHandler(fn func(error)) Option {
 	}
 }
 
+// WithHeartbeat sets how often this process reports itself alive, and how
+// long another process may go silent before its unfinished jobs are treated as
+// interrupted. It only matters when several processes share one store.
+func WithHeartbeat(interval time.Duration, staleAfter time.Duration) Option {
+	return func(s *Sink) {
+		if interval > 0 {
+			s.heartbeat = interval
+		}
+		if staleAfter > 0 {
+			s.staleAfter = staleAfter
+		}
+	}
+}
+
 // WithRetention prunes terminal jobs older than age, on every interval and
 // once at startup. History grows without bound otherwise.
 //
@@ -97,6 +117,8 @@ type Sink struct {
 	flushTick time.Duration
 	onError   func(error)
 
+	heartbeat       time.Duration
+	staleAfter      time.Duration
 	retentionAge    time.Duration
 	retentionTick   time.Duration
 	retentionStates []store.State
@@ -117,13 +139,15 @@ type Sink struct {
 // Call Start before registering the hooks with a queue.
 func New(st store.Store, opts ...Option) *Sink {
 	s := &Sink{
-		store:     st,
-		epoch:     newEpoch(),
-		buffer:    DefaultBuffer,
-		batchSize: DefaultBatchSize,
-		flushTick: DefaultFlushTick,
-		done:      make(chan struct{}),
-		stopped:   make(chan struct{}),
+		store:      st,
+		epoch:      newEpoch(),
+		buffer:     DefaultBuffer,
+		batchSize:  DefaultBatchSize,
+		flushTick:  DefaultFlushTick,
+		heartbeat:  DefaultHeartbeat,
+		staleAfter: DefaultStaleAfter,
+		done:       make(chan struct{}),
+		stopped:    make(chan struct{}),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -153,17 +177,43 @@ func (s *Sink) Start(ctx context.Context) (int, error) {
 	if err := s.store.Migrate(ctx); err != nil {
 		return 0, err
 	}
-	reconciled, err := s.store.ReconcileEpoch(ctx, s.epoch)
+	// Claim this epoch before reconciling, so a sibling starting at the same
+	// moment sees us as alive rather than as abandoned work.
+	if err := s.store.Heartbeat(ctx, s.epoch, time.Now()); err != nil {
+		return 0, err
+	}
+	reconciled, err := s.store.ReconcileEpoch(ctx, s.epoch, s.staleAfter)
 	if err != nil {
 		return 0, err
 	}
 
 	s.started = true
 	go s.run()
+	go s.beat()
 	if s.retentionAge > 0 {
 		go s.retain()
 	}
 	return reconciled, nil
+}
+
+// beat reports this process alive until Close, then retires the epoch so a
+// restart reconciles immediately instead of waiting out the staleness window.
+func (s *Sink) beat() {
+	ticker := time.NewTicker(s.heartbeat)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			if err := s.store.Heartbeat(context.Background(), s.epoch, time.Now()); err != nil {
+				s.reportError(err)
+			}
+		case <-s.done:
+			if err := s.store.Heartbeat(context.Background(), s.epoch, time.Time{}); err != nil {
+				s.reportError(err)
+			}
+			return
+		}
+	}
 }
 
 // retain prunes aged history until Close.
@@ -346,19 +396,30 @@ func (s *Sink) Hooks() cq.Hooks {
 // ProgressMiddleware wraps every job on a queue so SetProgress reports here.
 // Register it with cq.WithMiddleware to cover a whole queue rather than
 // wrapping each job individually.
-func (s *Sink) ProgressMiddleware() cq.Middleware {
+//
+// The queue name is required because cq's JobMeta does not carry it, and a
+// job's identity is only unique within its queue... without it, progress from
+// one queue would land on another queue's job.
+func (s *Sink) ProgressMiddleware(queueName string) cq.Middleware {
 	return func(job cq.Job) cq.Job {
-		return cq.WithProgress(job, s)
+		return cq.WithProgress(job, queueReporter{sink: s, queue: queueName})
 	}
 }
 
+// queueReporter binds progress reports to the queue that produced them.
+type queueReporter struct {
+	sink  *Sink
+	queue string
+}
+
 // ReportProgress implements cq.ProgressReporter.
-func (s *Sink) ReportProgress(_ context.Context, meta cq.JobMeta, progress cq.Progress) {
-	s.offer(record{
+func (q queueReporter) ReportProgress(_ context.Context, meta cq.JobMeta, progress cq.Progress) {
+	q.sink.offer(record{
 		isJob: true,
 		job: store.Job{
 			ID:                meta.ID,
-			Epoch:             s.epoch,
+			Epoch:             q.sink.epoch,
+			Queue:             q.queue,
 			Name:              meta.Name,
 			State:             store.StateActive,
 			Attributes:        meta.Attributes,
@@ -414,6 +475,7 @@ func (s *Sink) offerAttempt(e cq.JobEvent, state store.State) {
 	attempt := store.Attempt{
 		JobID:      e.ID,
 		Epoch:      s.epoch,
+		Queue:      e.QueueName,
 		Attempt:    e.Attempt,
 		State:      state,
 		StartedAt:  e.StartedAt,

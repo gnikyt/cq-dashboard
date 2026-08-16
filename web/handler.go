@@ -798,7 +798,7 @@ func (h *Handler) pendingViews() []pendingView {
 		for _, submission := range queue.Submissions() {
 			views = append(views, pendingView{
 				Queue:      name,
-				Key:        store.KeyFor(h.sink.Epoch(), submission.Meta.ID),
+				Key:        store.KeyFor(h.sink.Epoch(), name, submission.Meta.ID),
 				State:      store.State(submission.State.String()),
 				Submission: submission,
 			})

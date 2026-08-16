@@ -1,6 +1,6 @@
 PKG=github.com/gnikyt/cq-dashboard
 
-.PHONY: all test test-coverage test-race demo fmt vet clean
+.PHONY: all test test-coverage test-race demo fmt vet lint tidy clean
 
 all: fmt vet test
 
@@ -21,6 +21,12 @@ fmt:
 
 vet:
 	go vet ./...
+
+lint:
+	golangci-lint run
+
+tidy:
+	go mod tidy
 
 clean:
 	go clean

@@ -42,7 +42,7 @@ func TestUpsertDoesNotRegressState(t *testing.T) {
 		t.Fatalf("UpsertJobs(): %v", err)
 	}
 
-	job, _, err := st.Job(ctx, store.KeyFor("e1", "1"))
+	job, _, err := st.Job(ctx, store.KeyFor("e1", "", "1"))
 	if err != nil {
 		t.Fatalf("Job(): %v", err)
 	}
@@ -73,7 +73,7 @@ func TestReconcileEpochMarksInterrupted(t *testing.T) {
 		t.Fatalf("UpsertJobs(): %v", err)
 	}
 
-	changed, err := st.ReconcileEpoch(ctx, "new")
+	changed, err := st.ReconcileEpoch(ctx, "new", time.Minute)
 	if err != nil {
 		t.Fatalf("ReconcileEpoch(): %v", err)
 	}
@@ -89,7 +89,7 @@ func TestReconcileEpochMarksInterrupted(t *testing.T) {
 		{"2", store.StateCompleted}, // Terminal jobs are left alone.
 		{"3", store.StateInterrupted},
 	} {
-		job, _, err := st.Job(ctx, store.KeyFor("old", tc.id))
+		job, _, err := st.Job(ctx, store.KeyFor("old", "", tc.id))
 		if err != nil {
 			t.Fatalf("Job(%q): %v", tc.id, err)
 		}
@@ -201,15 +201,15 @@ func TestPruneRemovesAgedTerminalJobs(t *testing.T) {
 	}
 
 	for _, id := range []string{"old-done", "old-failed"} {
-		if _, _, err := st.Job(ctx, store.KeyFor("e", id)); err == nil {
+		if _, _, err := st.Job(ctx, store.KeyFor("e", "", id)); err == nil {
 			t.Errorf("Job(%q): still present after prune", id)
 		}
 	}
 	// Unfinished jobs are never pruned, however old.
-	if _, _, err := st.Job(ctx, store.KeyFor("e", "old-active")); err != nil {
+	if _, _, err := st.Job(ctx, store.KeyFor("e", "", "old-active")); err != nil {
 		t.Errorf("Job(old-active): got %v, want the unfinished job kept", err)
 	}
-	if _, _, err := st.Job(ctx, store.KeyFor("e", "new-done")); err != nil {
+	if _, _, err := st.Job(ctx, store.KeyFor("e", "", "new-done")); err != nil {
 		t.Errorf("Job(new-done): got %v, want the recent job kept", err)
 	}
 
@@ -243,7 +243,7 @@ func TestPruneRespectsStates(t *testing.T) {
 	if removed != 1 {
 		t.Errorf("Prune(): got %d removed, want 1", removed)
 	}
-	if _, _, err := st.Job(ctx, store.KeyFor("e", "failed")); err != nil {
+	if _, _, err := st.Job(ctx, store.KeyFor("e", "", "failed")); err != nil {
 		t.Errorf("Job(failed): got %v, want failures kept", err)
 	}
 }
@@ -281,11 +281,11 @@ func TestJobsFromDifferentEpochsDoNotCollide(t *testing.T) {
 		t.Fatalf("UpsertJobs(): %v", err)
 	}
 
-	first, _, err := st.Job(ctx, store.KeyFor("run-a", "1"))
+	first, _, err := st.Job(ctx, store.KeyFor("run-a", "", "1"))
 	if err != nil {
 		t.Fatalf("Job(run-a): %v", err)
 	}
-	second, _, err := st.Job(ctx, store.KeyFor("run-b", "1"))
+	second, _, err := st.Job(ctx, store.KeyFor("run-b", "", "1"))
 	if err != nil {
 		t.Fatalf("Job(run-b): %v", err)
 	}

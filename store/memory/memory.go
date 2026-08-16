@@ -34,6 +34,7 @@ type Store struct {
 	mut      sync.RWMutex
 	jobs     map[string]store.Job       // Composite key to job.
 	attempts map[string][]store.Attempt // Composite key to attempts.
+	epochs   map[string]time.Time       // Epoch to its last heartbeat.
 }
 
 // Open creates an empty store.
@@ -41,6 +42,7 @@ func Open() *Store {
 	return &Store{
 		jobs:     make(map[string]store.Job),
 		attempts: make(map[string][]store.Attempt),
+		epochs:   make(map[string]time.Time),
 	}
 }
 
@@ -60,7 +62,7 @@ func (s *Store) UpsertJobs(_ context.Context, jobs []store.Job) error {
 	defer s.mut.Unlock()
 
 	for _, incoming := range jobs {
-		key := store.KeyFor(incoming.Epoch, incoming.ID)
+		key := store.KeyFor(incoming.Epoch, incoming.Queue, incoming.ID)
 		incoming.Key = key
 		incoming.Pattern = store.NormalizeName(incoming.Name)
 
@@ -133,7 +135,7 @@ func (s *Store) SaveAttempts(_ context.Context, attempts []store.Attempt) error 
 	defer s.mut.Unlock()
 
 	for _, incoming := range attempts {
-		key := store.KeyFor(incoming.Epoch, incoming.JobID)
+		key := store.KeyFor(incoming.Epoch, incoming.Queue, incoming.JobID)
 		replaced := false
 		for i, existing := range s.attempts[key] {
 			if existing.Attempt != incoming.Attempt || !existing.StartedAt.Equal(incoming.StartedAt) {
@@ -156,14 +158,28 @@ func (s *Store) SaveAttempts(_ context.Context, attempts []store.Attempt) error 
 	return nil
 }
 
-// ReconcileEpoch marks non-terminal jobs from earlier epochs as interrupted.
-func (s *Store) ReconcileEpoch(_ context.Context, epoch string) (int, error) {
+// Heartbeat records that an epoch is alive as of seenAt.
+func (s *Store) Heartbeat(_ context.Context, epoch string, seenAt time.Time) error {
+	s.mut.Lock()
+	defer s.mut.Unlock()
+	s.epochs[epoch] = seenAt
+	return nil
+}
+
+// ReconcileEpoch marks non-terminal jobs as interrupted when the epoch that
+// owned them is neither the caller's nor still beating.
+func (s *Store) ReconcileEpoch(_ context.Context, epoch string, staleAfter time.Duration) (int, error) {
 	s.mut.Lock()
 	defer s.mut.Unlock()
 
+	cutoff := time.Now().Add(-staleAfter)
 	changed := 0
 	for key, job := range s.jobs {
 		if job.Epoch == epoch || job.State.Terminal() {
+			continue
+		}
+		// A sibling still beating owns its jobs... leave them alone.
+		if seen, known := s.epochs[job.Epoch]; known && !seen.IsZero() && !seen.Before(cutoff) {
 			continue
 		}
 		job.State = store.StateInterrupted

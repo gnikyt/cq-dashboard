@@ -18,20 +18,57 @@ type Store struct {
 	db *sql.DB
 }
 
-// Open opens (creating if needed) the database at dsn.
+// Open opens (creating if needed) the database at dsn, using the bundled
+// pure-Go driver and the settings this store wants.
 // Use ":memory:" for an ephemeral store.
 func Open(dsn string) (*Store, error) {
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: open: %w", err)
 	}
-	// One writer avoids SQLITE_BUSY... the sink batches, so this is not a
-	// throughput concern.
+	// One connection serialises this process's writers... the sink batches, so
+	// this is not a throughput concern. It says nothing about other processes
+	// sharing the file, which is what busy_timeout is for: without it a second
+	// process writing concurrently fails the batch outright with SQLITE_BUSY.
+	//
+	// The single connection is also what makes setting busy_timeout here work
+	// at all: it is a per-connection setting, so a pool would leave every
+	// other connection without one. See New.
 	db.SetMaxOpenConns(1)
-	if _, err := db.Exec(`PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;`); err != nil {
+	if _, err := db.Exec(`
+		PRAGMA journal_mode = WAL;
+		PRAGMA synchronous = NORMAL;
+		PRAGMA busy_timeout = 5000;
+	`); err != nil {
 		return nil, fmt.Errorf("sqlite: pragma: %w", err)
 	}
 	return &Store{db: db}, nil
+}
+
+// New wraps a database you opened yourself, for a driver of your choosing, a
+// pool shared with the rest of your application, or a DSN carrying options
+// this package knows nothing about.
+//
+// The SQL is SQLite dialect (upserts, json_extract), not portable SQL, so db
+// must be some SQLite driver... a Postgres handle will compile and then fail
+// on the first query. Two settings are yours to get right:
+//
+//   - journal_mode=WAL, or concurrent readers block behind every write. It is
+//     recorded in the database file, so setting it once is enough.
+//   - busy_timeout, or a second process writing at the same moment fails the
+//     batch with SQLITE_BUSY. It is per-connection, so it belongs in the DSN
+//     rather than in a PRAGMA this package could run for you.
+//
+// Keeping the pool small is wise for the same reason Open caps it at one: the
+// sink batches its writes, so extra connections buy contention, not speed.
+//
+//	db, err := sql.Open("sqlite",
+//		"/var/lib/myapp/cq.db?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
+//	st := sqlite.New(db)
+//
+// Closing the store closes db.
+func New(db *sql.DB) *Store {
+	return &Store{db: db}
 }
 
 const schema = `
@@ -63,6 +100,11 @@ CREATE INDEX IF NOT EXISTS jobs_state_idx ON jobs(state);
 CREATE INDEX IF NOT EXISTS jobs_pattern_idx ON jobs(pattern);
 CREATE INDEX IF NOT EXISTS jobs_root_idx ON jobs(epoch, root_id);
 CREATE INDEX IF NOT EXISTS jobs_enqueued_idx ON jobs(enqueued_at DESC);
+
+CREATE TABLE IF NOT EXISTS epochs (
+	epoch   TEXT PRIMARY KEY,
+	seen_at INTEGER NOT NULL DEFAULT 0
+);
 
 CREATE TABLE IF NOT EXISTS attempts (
 	job_key     TEXT NOT NULL,
@@ -148,7 +190,7 @@ func (s *Store) UpsertJobs(ctx context.Context, jobs []store.Job) error {
 			attrs = string(encoded)
 		}
 		if _, err := stmt.ExecContext(ctx,
-			store.KeyFor(job.Epoch, job.ID), job.ID, job.Epoch,
+			store.KeyFor(job.Epoch, job.Queue, job.ID), job.ID, job.Epoch,
 			job.Queue, job.Name, store.NormalizeName(job.Name),
 			string(job.State), job.State.Rank(),
 			job.Err, job.RootID, job.Parent, attrs,
@@ -188,7 +230,7 @@ func (s *Store) SaveAttempts(ctx context.Context, attempts []store.Attempt) erro
 
 	for _, attempt := range attempts {
 		if _, err := stmt.ExecContext(ctx,
-			store.KeyFor(attempt.Epoch, attempt.JobID), attempt.JobID, attempt.Attempt,
+			store.KeyFor(attempt.Epoch, attempt.Queue, attempt.JobID), attempt.JobID, attempt.Attempt,
 			string(attempt.State), attempt.Err,
 			unix(attempt.StartedAt), unix(attempt.FinishedAt)); err != nil {
 			return fmt.Errorf("sqlite: save attempts: %w", err)
@@ -197,14 +239,33 @@ func (s *Store) SaveAttempts(ctx context.Context, attempts []store.Attempt) erro
 	return tx.Commit()
 }
 
-// ReconcileEpoch marks non-terminal jobs from earlier epochs as interrupted.
-// A job left "active" by a crashed process cannot resolve itself... this is
-// what stops it lingering forever.
-func (s *Store) ReconcileEpoch(ctx context.Context, epoch string) (int, error) {
+// Heartbeat records that an epoch is alive as of seenAt.
+func (s *Store) Heartbeat(ctx context.Context, epoch string, seenAt time.Time) error {
+	if _, err := s.db.ExecContext(ctx, `
+		INSERT INTO epochs (epoch, seen_at) VALUES (?, ?)
+		ON CONFLICT(epoch) DO UPDATE SET seen_at = excluded.seen_at
+	`, epoch, unix(seenAt)); err != nil {
+		return fmt.Errorf("sqlite: heartbeat: %w", err)
+	}
+	return nil
+}
+
+// ReconcileEpoch marks non-terminal jobs as interrupted when the epoch that
+// owned them is neither the caller's nor still beating.
+//
+// A job left "active" by a crashed process cannot resolve itself. A job held
+// by a live sibling can, so the liveness join is what makes one store safe to
+// share between processes.
+func (s *Store) ReconcileEpoch(ctx context.Context, epoch string, staleAfter time.Duration) (int, error) {
+	cutoff := unix(time.Now().Add(-staleAfter))
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE jobs SET state = ?, state_rank = 3
-		WHERE epoch != ? AND state_rank < 3
-	`, string(store.StateInterrupted), epoch)
+		WHERE epoch != ?
+		  AND state_rank < 3
+		  AND epoch NOT IN (
+			SELECT epoch FROM epochs WHERE seen_at > 0 AND seen_at >= ?
+		  )
+	`, string(store.StateInterrupted), epoch, cutoff)
 	if err != nil {
 		return 0, fmt.Errorf("sqlite: reconcile epoch: %w", err)
 	}

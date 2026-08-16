@@ -54,19 +54,29 @@ func main() {
 		log.Printf("reconciled %d jobs left running by a previous process", reconciled)
 	}
 
+	// Two queues, because one queue hides every multi-queue bug: name
+	// collisions in the controls, per-queue filtering, and whether the live
+	// panels aggregate or interleave.
 	queue := cq.NewQueue(2, 6, 128,
 		cq.WithQueueName("demo"),
 		cq.WithHooks(sk.Hooks()),
-		cq.WithMiddleware(sk.ProgressMiddleware()),
+		cq.WithMiddleware(sk.ProgressMiddleware("demo")),
 	)
 	queue.Start()
+
+	reports := cq.NewQueue(1, 2, 32,
+		cq.WithQueueName("reports"),
+		cq.WithHooks(sk.Hooks()),
+		cq.WithMiddleware(sk.ProgressMiddleware("reports")),
+	)
+	reports.Start()
 
 	scheduler := cq.NewScheduler(context.Background(), queue)
 	defer scheduler.Stop()
 	registerSchedules(scheduler)
 
 	opts := []web.Option{
-		web.WithQueues(queue),
+		web.WithQueues(queue, reports),
 		web.WithSchedulers(scheduler),
 	}
 	if *user != "" && *pass != "" {
@@ -108,6 +118,7 @@ func main() {
 
 	stop := make(chan struct{})
 	go produce(queue, *rate, stop)
+	go produceReports(reports, *rate*4, stop)
 
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
@@ -124,7 +135,11 @@ func main() {
 	if err != nil {
 		log.Printf("drain bounded: %v", err)
 	}
-	log.Printf("drained %d unstarted jobs", len(drained))
+	fromReports, err := reports.StopDrain(ctx)
+	if err != nil {
+		log.Printf("reports drain bounded: %v", err)
+	}
+	log.Printf("drained %d unstarted jobs", len(drained)+len(fromReports))
 
 	if err := sk.Close(); err != nil {
 		log.Printf("sink close: %v", err)
@@ -173,6 +188,36 @@ func produce(queue *cq.Queue, rate time.Duration, stop <-chan struct{}) {
 			return
 		case <-ticker.C:
 			kinds[rand.Intn(len(kinds))](queue)
+		}
+	}
+}
+
+// produceReports submits slower work on the second queue, so the two are
+// visibly distinct in the UI.
+func produceReports(queue *cq.Queue, rate time.Duration, stop <-chan struct{}) {
+	ticker := time.NewTicker(rate)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+			_, _ = queue.Submit(context.Background(), func(ctx context.Context) error {
+				total := int64(5)
+				for i := int64(1); i <= total; i++ {
+					select {
+					case <-ctx.Done():
+						return ctx.Err()
+					case <-time.After(200 * time.Millisecond):
+					}
+					cq.SetProgress(ctx, cq.Progress{Completed: i, Total: total, Stage: "rendering"})
+				}
+				if rand.Intn(4) == 0 {
+					return errors.New("report source unavailable")
+				}
+				return nil
+			}, cq.WithJobName("nightly-rollup"), cq.WithJobAttribute("tenant", "initech"))
 		}
 	}
 }

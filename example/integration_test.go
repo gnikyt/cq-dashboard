@@ -38,7 +38,7 @@ func TestReadmeWiring(t *testing.T) {
 	queue := cq.NewQueue(2, 6, 128,
 		cq.WithQueueName("default"),
 		cq.WithHooks(sk.Hooks()),
-		cq.WithMiddleware(sk.ProgressMiddleware()),
+		cq.WithMiddleware(sk.ProgressMiddleware("default")),
 	)
 	queue.Start()
 

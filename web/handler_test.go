@@ -172,7 +172,7 @@ func TestJobDetailRenders(t *testing.T) {
 	var body string
 	for range 100 {
 		rec := httptest.NewRecorder()
-		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/cq/jobs/"+store.KeyFor(sk.Epoch(), handle.ID()), nil))
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/cq/jobs/"+store.KeyFor(sk.Epoch(), queue.Stats().Name, handle.ID()), nil))
 		if rec.Code == http.StatusOK {
 			body = rec.Body.String()
 			break

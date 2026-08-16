@@ -44,7 +44,7 @@ func TestSinkRecordsQueueLifecycle(t *testing.T) {
 	queue.Stop(true)
 	sk.Close()
 
-	job, _, err := st.Job(context.Background(), store.KeyFor(sk.Epoch(), handle.ID()))
+	job, _, err := st.Job(context.Background(), store.KeyFor(sk.Epoch(), queue.Stats().Name, handle.ID()))
 	if err != nil {
 		t.Fatalf("Job(): %v", err)
 	}
@@ -89,7 +89,7 @@ func TestSinkRecordsAttempts(t *testing.T) {
 	queue.Stop(true)
 	sk.Close()
 
-	stored, rows, err := st.Job(context.Background(), store.KeyFor(sk.Epoch(), handle.ID()))
+	stored, rows, err := st.Job(context.Background(), store.KeyFor(sk.Epoch(), queue.Stats().Name, handle.ID()))
 	if err != nil {
 		t.Fatalf("Job(): %v", err)
 	}
@@ -119,7 +119,7 @@ func TestSinkRecordsAbandonedJobs(t *testing.T) {
 	}
 	sk.Close()
 
-	job, _, err := st.Job(context.Background(), store.KeyFor(sk.Epoch(), handle.ID()))
+	job, _, err := st.Job(context.Background(), store.KeyFor(sk.Epoch(), queue.Stats().Name, handle.ID()))
 	if err != nil {
 		t.Fatalf("Job(): %v", err)
 	}
@@ -188,7 +188,7 @@ func TestSinkRecordsProgress(t *testing.T) {
 
 	queue := cq.NewQueue(1, 1, 8,
 		cq.WithHooks(sk.Hooks()),
-		cq.WithMiddleware(sk.ProgressMiddleware()),
+		cq.WithMiddleware(sk.ProgressMiddleware("")),
 	)
 	queue.Start()
 
@@ -203,7 +203,7 @@ func TestSinkRecordsProgress(t *testing.T) {
 	queue.Stop(true)
 	sk.Close()
 
-	job, _, err := st.Job(context.Background(), store.KeyFor(sk.Epoch(), handle.ID()))
+	job, _, err := st.Job(context.Background(), store.KeyFor(sk.Epoch(), queue.Stats().Name, handle.ID()))
 	if err != nil {
 		t.Fatalf("Job(): %v", err)
 	}

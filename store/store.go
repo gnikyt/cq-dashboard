@@ -51,9 +51,10 @@ func (s State) Terminal() bool {
 // Job is one cq submission. A logical job that reschedules or releases spans
 // several of these, linked by RootID.
 //
-// Identity is (Epoch, ID), not ID alone: cq's default IDs are per-process
-// counters that restart at 1, so two runs sharing a store would otherwise
-// collide. Key carries that composite and is what links and lookups use.
+// Identity is (Epoch, Queue, ID), not ID alone. cq's default IDs are counters
+// scoped to one queue: they restart at 1 on every boot, and two queues in the
+// same process both mint "1". Key carries that composite and is what links and
+// lookups use.
 type Job struct {
 	Key     string // Stable row identity: "<epoch>:<id>". Set by the store.
 	ID      string // cq's submission ID, unique only within an epoch.
@@ -86,8 +87,9 @@ type Job struct {
 // Attempt is one execution attempt within a submission, from cq's
 // OnAttemptStart/Success/Failure hooks.
 type Attempt struct {
-	JobID      string // cq's submission ID, scoped to Epoch.
+	JobID      string // cq's submission ID, scoped to Epoch and Queue.
 	Epoch      string
+	Queue      string
 	Attempt    int
 	State      State
 	Err        string
@@ -171,9 +173,23 @@ type Store interface {
 	// SaveAttempts appends attempt records.
 	SaveAttempts(ctx context.Context, attempts []Attempt) error
 
-	// ReconcileEpoch marks non-terminal jobs from earlier epochs as
-	// interrupted, returning how many rows changed.
-	ReconcileEpoch(ctx context.Context, epoch string) (int, error)
+	// Heartbeat records that an epoch is alive as of seenAt. A zero seenAt
+	// retires the epoch, so a restart can reconcile its jobs immediately
+	// rather than waiting for them to go stale.
+	Heartbeat(ctx context.Context, epoch string, seenAt time.Time) error
+
+	// ReconcileEpoch marks non-terminal jobs as interrupted when the epoch
+	// that owned them is neither the caller's nor still beating, returning how
+	// many rows changed.
+	//
+	// staleAfter is how long an epoch may go without a heartbeat before it
+	// counts as dead. Epochs that never heartbeated at all are dead: they
+	// predate this bookkeeping, or their process died before its first beat.
+	//
+	// A live sibling's jobs must survive this. Two processes sharing one store
+	// is the whole reason the liveness check exists... without it, every
+	// deploy would mark the running instance's in-flight work interrupted.
+	ReconcileEpoch(ctx context.Context, epoch string, staleAfter time.Duration) (int, error)
 
 	// Jobs lists jobs newest first.
 	Jobs(ctx context.Context, filter Filter) ([]Job, error)
@@ -212,8 +228,12 @@ type Store interface {
 	Close() error
 }
 
-// KeyFor builds a job's stable row identity from the epoch that observed it
-// and cq's submission ID.
-func KeyFor(epoch string, id string) string {
-	return epoch + ":" + id
+// KeyFor builds a job's stable row identity.
+//
+// All three parts are needed: the epoch separates process runs, the queue
+// separates counters within one run, and the ID is unique only inside that
+// pair. Two unnamed queues in one process cannot be told apart... cq reports
+// no name for them, so nothing downstream can.
+func KeyFor(epoch string, queue string, id string) string {
+	return epoch + ":" + queue + ":" + id
 }

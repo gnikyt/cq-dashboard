@@ -8,8 +8,8 @@ cq's lifecycle hooks, writes them to SQLite, and serves views over the result.
 The core library keeps its zero-dependency promise because none of this lives
 inside it.
 
-> Status: single process. Read-only by default; write controls are opt-in
-> and require an authorizer.
+> Status: read-only by default; write controls are opt-in and require an
+> authorizer. Several processes may share one store.
 
 ## What it shows
 
@@ -84,7 +84,7 @@ if interrupted > 0 {
 queue := cq.NewQueue(2, 6, 128,
 	cq.WithQueueName("default"),                // Names the queue in the UI.
 	cq.WithHooks(sk.Hooks()),                   // Required: the event feed.
-	cq.WithMiddleware(sk.ProgressMiddleware()), // Optional: queue-wide progress.
+	cq.WithMiddleware(sk.ProgressMiddleware("default")), // Optional: progress.
 )
 queue.Start()
 
@@ -254,9 +254,36 @@ Other properties worth knowing:
 SQLite is the bundled backend, not an assumption. `store.Store` is the only
 seam: the sink and the web layer never touch a driver. A new backend is one
 package implementing that interface, and `store/storetest` is the conformance
-suite it must pass... the same 19 cases the SQLite driver runs, covering the
+suite it must pass... the same 21 cases the SQLite driver runs, covering the
 semantics rather than the SQL: out-of-order merges, epoch isolation, lineage
 scoping, prune boundaries, frozen pagination windows.
+
+### Bringing your own database handle
+
+`sqlite.Open` uses the bundled pure-Go driver and sets what this store wants.
+If you would rather choose the driver, share a pool with the rest of your
+application, or pass DSN options of your own, hand it a `*sql.DB` instead:
+
+```go
+db, err := sql.Open("sqlite",
+	"/var/lib/myapp/cq.db?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
+if err != nil {
+	log.Fatal(err)
+}
+db.SetMaxOpenConns(1)
+st := sqlite.New(db)
+```
+
+Two settings become yours to get right, and both are load-bearing: WAL, or
+readers block behind every write, and `busy_timeout`, or a second process
+writing at the same moment fails with `SQLITE_BUSY`. The timeout is
+per-connection in SQLite, which is why it belongs in the DSN rather than in a
+`PRAGMA` this package could run on one connection of your pool and call it
+done. Keep the pool small... the sink batches, so extra connections buy
+contention rather than throughput.
+
+The SQL is SQLite dialect, so `New` accepts any SQLite driver, not any
+database. A Postgres handle compiles and then fails on the first query.
 
 `store/memory` is the reference implementation: no database, no dependencies,
 and it passes the same suite. It is what this module's own tests run against,
@@ -264,12 +291,17 @@ and it doubles as a fixture for testing application code that reads the store.
 It keeps nothing across a restart, which is the one thing the dashboard exists
 to do, so it is not a deployment option.
 
-Two things to know before pointing several processes at one shared database:
-`ReconcileEpoch` currently marks every *other* epoch's unfinished jobs as
-interrupted, which is right for one process restarting and wrong for two
-running side by side. Epochs need liveness before that is safe. And the
-bundled SQLite driver caps itself to a single connection, which a networked
-database should not.
+Several processes can share one database. Each sink heartbeats its epoch, and
+`ReconcileEpoch` only marks jobs interrupted when the epoch that owned them has
+stopped beating, so a restart cleans up after itself without a live sibling
+declaring its running jobs dead. Tune the margin with
+`sink.WithHeartbeat(interval, staleAfter)`; the default beats every 15s and
+declares an epoch dead after 60s of silence.
+
+The bundled SQLite driver holds a single connection and sets a 5s
+`busy_timeout`, which is what makes concurrent writers on one file work. It is
+still SQLite on one filesystem: for several machines, write a driver for a
+networked database against `store.Store`.
 
 ## Design notes
 

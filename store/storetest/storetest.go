@@ -36,6 +36,7 @@ func RunSuite(t *testing.T, newStore Factory) {
 		{"UpsertNeverRegressesState", upsertNeverRegressesState},
 		{"UpsertKeepsLatestProgress", upsertKeepsLatestProgress},
 		{"EpochsIsolateIdenticalIDs", epochsIsolateIdenticalIDs},
+		{"QueuesIsolateIdenticalIDs", queuesIsolateIdenticalIDs},
 		{"AttemptsRoundTrip", attemptsRoundTrip},
 		{"LineageIsScopedAndOrdered", lineageIsScopedAndOrdered},
 		{"FilterByQueueNameAndState", filterByQueueNameAndState},
@@ -45,7 +46,8 @@ func RunSuite(t *testing.T, newStore Factory) {
 		{"PaginationIsStableAndCounted", paginationIsStableAndCounted},
 		{"GroupsCollapseIdentifiers", groupsCollapseIdentifiers},
 		{"CountsByState", countsByState},
-		{"ReconcileMarksOtherEpochs", reconcileMarksOtherEpochs},
+		{"ReconcileMarksDeadEpochs", reconcileMarksDeadEpochs},
+		{"ReconcileSparesLiveSiblings", reconcileSparesLiveSiblings},
 		{"PruneRemovesOnlyAgedTerminal", pruneRemovesOnlyAgedTerminal},
 		{"PruneRespectsStates", pruneRespectsStates},
 		{"TimelineBucketsAndRefusesAbsurdRanges", timelineBucketsAndRefusesAbsurdRanges},
@@ -106,10 +108,16 @@ func save(t *testing.T, st store.Store, jobs ...store.Job) {
 	}
 }
 
-// load reads one job by its epoch and ID.
+// load reads one job by its epoch and ID, on the default queue.
 func load(t *testing.T, st store.Store, epoch string, id string) store.Job {
 	t.Helper()
-	found, _, err := st.Job(context.Background(), store.KeyFor(epoch, id))
+	return loadFrom(t, st, epoch, "default", id)
+}
+
+// loadFrom reads one job by its full identity.
+func loadFrom(t *testing.T, st store.Store, epoch string, queue string, id string) store.Job {
+	t.Helper()
+	found, _, err := st.Job(context.Background(), store.KeyFor(epoch, queue, id))
 	if err != nil {
 		t.Fatalf("Job(%s/%s): %v", epoch, id, err)
 	}
@@ -205,15 +213,15 @@ func attemptsRoundTrip(t *testing.T, st store.Store) {
 	save(t, st, job("1", withState(store.StateCompleted)))
 
 	attempts := []store.Attempt{
-		{JobID: "1", Epoch: "epoch-a", Attempt: 0, State: store.StateFailed, Err: "boom", StartedAt: now},
-		{JobID: "1", Epoch: "epoch-a", Attempt: 1, State: store.StateCompleted, StartedAt: now.Add(time.Second)},
-		{JobID: "1", Epoch: "other", Attempt: 0, State: store.StateFailed, StartedAt: now},
+		{JobID: "1", Epoch: "epoch-a", Queue: "default", Attempt: 0, State: store.StateFailed, Err: "boom", StartedAt: now},
+		{JobID: "1", Epoch: "epoch-a", Queue: "default", Attempt: 1, State: store.StateCompleted, StartedAt: now.Add(time.Second)},
+		{JobID: "1", Epoch: "other", Queue: "default", Attempt: 0, State: store.StateFailed, StartedAt: now},
 	}
 	if err := st.SaveAttempts(ctx, attempts); err != nil {
 		t.Fatalf("SaveAttempts(): %v", err)
 	}
 
-	_, got, err := st.Job(ctx, store.KeyFor("epoch-a", "1"))
+	_, got, err := st.Job(ctx, store.KeyFor("epoch-a", "default", "1"))
 	if err != nil {
 		t.Fatalf("Job(): %v", err)
 	}
@@ -457,15 +465,16 @@ func countsByState(t *testing.T, st store.Store) {
 	}
 }
 
-// A job left mid-flight by a dead process cannot resolve itself.
-func reconcileMarksOtherEpochs(t *testing.T, st store.Store) {
+// A job left mid-flight by a dead process cannot resolve itself. An epoch
+// that never heartbeated is dead by definition.
+func reconcileMarksDeadEpochs(t *testing.T, st store.Store) {
 	save(t, st,
 		job("1", withEpoch("old"), withState(store.StateActive)),
 		job("2", withEpoch("old"), withState(store.StateCreated)),
 		job("3", withEpoch("old"), withState(store.StateCompleted)),
 	)
 
-	changed, err := st.ReconcileEpoch(context.Background(), "new")
+	changed, err := st.ReconcileEpoch(context.Background(), "new", time.Minute)
 	if err != nil {
 		t.Fatalf("ReconcileEpoch(): %v", err)
 	}
@@ -494,7 +503,7 @@ func pruneRemovesOnlyAgedTerminal(t *testing.T, st store.Store) {
 		job("new-done", withState(store.StateCompleted), withEnqueued(recent), withFinished(recent)),
 	)
 	if err := st.SaveAttempts(ctx, []store.Attempt{
-		{JobID: "old-done", Epoch: "epoch-a", Attempt: 0, State: store.StateFailed, StartedAt: old},
+		{JobID: "old-done", Epoch: "epoch-a", Queue: "default", Attempt: 0, State: store.StateFailed, StartedAt: old},
 	}); err != nil {
 		t.Fatalf("SaveAttempts(): %v", err)
 	}
@@ -506,7 +515,7 @@ func pruneRemovesOnlyAgedTerminal(t *testing.T, st store.Store) {
 	if removed != 1 {
 		t.Errorf("Prune(): got %d removed, want 1", removed)
 	}
-	if _, _, err := st.Job(ctx, store.KeyFor("epoch-a", "old-done")); err == nil {
+	if _, _, err := st.Job(ctx, store.KeyFor("epoch-a", "default", "old-done")); err == nil {
 		t.Error("old-done survived the prune")
 	}
 	// Unfinished work is never pruned, however old... it has not finished yet.
@@ -604,7 +613,77 @@ func attributeKeysAreDiscovered(t *testing.T, st store.Store) {
 }
 
 func missingJobIsAnError(t *testing.T, st store.Store) {
-	if _, _, err := st.Job(context.Background(), store.KeyFor("nope", "nope")); err == nil {
+	if _, _, err := st.Job(context.Background(), store.KeyFor("nope", "nope", "nope")); err == nil {
 		t.Error("Job(missing): got nil error, want a lookup failure")
+	}
+}
+
+// Two processes sharing one store is the reason liveness exists: a sibling
+// that is still beating owns its unfinished jobs, and a restart elsewhere
+// must not declare them interrupted.
+func reconcileSparesLiveSiblings(t *testing.T, st store.Store) {
+	ctx := context.Background()
+	save(t, st,
+		job("1", withEpoch("live-sibling"), withState(store.StateActive)),
+		job("2", withEpoch("dead-sibling"), withState(store.StateActive)),
+		job("3", withEpoch("retired"), withState(store.StateActive)),
+	)
+
+	if err := st.Heartbeat(ctx, "live-sibling", time.Now()); err != nil {
+		t.Fatalf("Heartbeat(live): %v", err)
+	}
+	if err := st.Heartbeat(ctx, "dead-sibling", time.Now().Add(-time.Hour)); err != nil {
+		t.Fatalf("Heartbeat(dead): %v", err)
+	}
+	// A zero heartbeat retires an epoch, so a clean shutdown is reconciled at
+	// once rather than after the staleness window.
+	if err := st.Heartbeat(ctx, "retired", time.Time{}); err != nil {
+		t.Fatalf("Heartbeat(retired): %v", err)
+	}
+
+	changed, err := st.ReconcileEpoch(ctx, "mine", time.Minute)
+	if err != nil {
+		t.Fatalf("ReconcileEpoch(): %v", err)
+	}
+	if changed != 2 {
+		t.Errorf("ReconcileEpoch(): got %d changed, want 2... the live sibling must be spared", changed)
+	}
+
+	for epoch, want := range map[string]store.State{
+		"live-sibling": store.StateActive,
+		"dead-sibling": store.StateInterrupted,
+		"retired":      store.StateInterrupted,
+	} {
+		id := map[string]string{"live-sibling": "1", "dead-sibling": "2", "retired": "3"}[epoch]
+		if got := load(t, st, epoch, id).State; got != want {
+			t.Errorf("%s job: got %v, want %v", epoch, got, want)
+		}
+	}
+}
+
+// cq's job IDs are per-queue counters, so two queues in one process both mint
+// "1". Keying on the epoch alone merges them: one queue's history disappears
+// into the other's rows.
+func queuesIsolateIdenticalIDs(t *testing.T, st store.Store) {
+	save(t, st,
+		job("1", withQueue("emails"), withName("send-email"), withState(store.StateCompleted)),
+		job("1", withQueue("reports"), withName("nightly-rollup"), withState(store.StateFailed)),
+	)
+
+	if got := loadFrom(t, st, "epoch-a", "emails", "1"); got.Name != "send-email" {
+		t.Errorf("emails job: got %q, want send-email", got.Name)
+	}
+	if got := loadFrom(t, st, "epoch-a", "reports", "1"); got.Name != "nightly-rollup" {
+		t.Errorf("reports job: got %q, want nightly-rollup", got.Name)
+	}
+
+	for queue, want := range map[string]int{"emails": 1, "reports": 1} {
+		found, err := st.Jobs(context.Background(), store.Filter{Queue: queue})
+		if err != nil {
+			t.Fatalf("Jobs(queue=%s): %v", queue, err)
+		}
+		if len(found) != want {
+			t.Errorf("Jobs(queue=%s): got %d, want %d", queue, len(found), want)
+		}
 	}
 }
