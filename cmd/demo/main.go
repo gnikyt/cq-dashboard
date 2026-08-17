@@ -85,6 +85,7 @@ func main() {
 	opts := []web.Option{
 		web.WithQueues(queue, reports),
 		web.WithSchedulers(scheduler),
+		web.WithJSON(),
 	}
 	if *user != "" && *pass != "" {
 		// A login form beats basic auth: it works in embedded browsers and
@@ -95,8 +96,10 @@ func main() {
 	}
 	if *token != "" {
 		// Controls act on the running queue, so they stay off without a token.
+		// The token is a credential; the policy is who may act with one.
 		opts = append(opts,
-			web.WithControls(web.BearerToken("demo-operator", *token)),
+			web.WithTokens(web.BearerToken("demo-operator", *token)),
+			web.WithControls(web.AllowSignedIn),
 			web.WithAudit(func(entry web.AuditEntry) {
 				log.Printf("audit: subject=%q action=%s queue=%s detail=%q allowed=%t err=%v",
 					entry.Subject, entry.Action, entry.Queue, entry.Detail, entry.Allowed, entry.Err)

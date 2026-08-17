@@ -8,8 +8,8 @@ cq's lifecycle hooks, writes them to SQLite, and serves views over the result.
 The core library keeps its zero-dependency promise because none of this lives
 inside it.
 
-> Status: read-only by default; write controls are opt-in and require an
-> authorizer. Several processes may share one store.
+> Status: read-only by default; write controls and the JSON endpoints are
+> opt-in. Several processes may share one store.
 
 ## What it shows
 
@@ -188,47 +188,91 @@ web.WithLogin(func(username, password string) (string, bool) {
 }, secret, 12*time.Hour)
 ```
 
-Already have sessions or SSO in front of this handler? Skip the login entirely
-and gate it with your own middleware, using `Authorizer` for the controls:
+### Scripts and machines
+
+`WithTokens` registers credentials carried in a header. They are tried in order
+and satisfy the same gate the login form does, so one deployment serves humans
+and scripts at once:
 
 ```go
-auth := func(r *http.Request) (string, bool) {
+handler, err := web.New("/cq", st, sk,
+	web.WithQueues(queue),
+	web.WithLogin(web.StaticPassword("ops", pass), secret, 12*time.Hour),
+	web.WithTokens(web.BearerToken("ci-bot", os.Getenv("CQ_DASH_TOKEN"))),
+)
+```
+
+Adding a credential is not the same as demanding one: `WithTokens` alone leaves
+the views open, since it only says how a caller *may* identify itself.
+`WithLogin` requires an identity, and `RequireSignIn` does the same for a
+token-only deployment with no form to redirect to:
+
+| Options | Views | Controls need |
+| --- | --- | --- |
+| none | public | — (off) |
+| `WithTokens` | public | a token |
+| `WithTokens` + `RequireSignIn` | token only | a token |
+| `WithLogin` | sign-in only | a session |
+| `WithLogin` + `WithTokens` | either | either |
+
+Already have sessions or SSO? Write an `Authorizer` against your own check and
+register it as a credential... it is just a function:
+
+```go
+mine := func(r *http.Request) (string, bool) {
 	user, err := mysession.FromRequest(r)
 	if err != nil || !user.IsAdmin {
 		return "", false
 	}
-	return user.Email, true
+	return user.Email, true // Lands in the audit log.
 }
 
-handler, _ := web.New("/cq", st, sk, web.WithQueues(queue), web.WithControls(auth))
-http.Handle("/cq/", web.RequireAuth(handler, auth))
+handler, _ := web.New("/cq", st, sk, web.WithQueues(queue),
+	web.WithTokens(mine), web.RequireSignIn(), web.WithControls(web.AllowSignedIn))
 ```
 
-`web.RequireAuth` and `web.BearerToken` / `web.BasicAuth` remain for scripted
-access and for gating the handler from outside. Serve over TLS: session
-cookies and basic credentials are both readable on the wire otherwise.
+`web.RequireAuth` still gates the whole handler from outside, which is where
+`web.BasicAuth` belongs: browsers resend basic credentials by themselves, so it
+must not be a `WithTokens` credential (token identities skip CSRF, and that
+assumption only holds for headers a browser will not send on its own).
+
+Serve over TLS: session cookies, bearer tokens and basic credentials are all
+readable on the wire otherwise.
 
 ## Write controls
 
 Off by default. The dashboard is read-only unless you pass `WithControls`, and
-that option **requires** an `Authorizer` — there is no arrangement in which
+that option **requires** a `ControlPolicy` — there is no arrangement in which
 exposing them unauthenticated is correct, so it is a compile-time argument
 rather than an optional extra:
 
 ```go
 handler, err := web.New("/cq", st, sk,
 	web.WithQueues(queue),
-	web.WithControls(web.BearerToken("ops@example.com", os.Getenv("CQ_DASH_TOKEN"))),
+	web.WithLogin(web.StaticPassword("ops", pass), secret, 12*time.Hour),
+	web.WithTokens(web.BearerToken("ci-bot", os.Getenv("CQ_DASH_TOKEN"))),
+	web.WithControls(web.AllowSignedIn),
 	web.WithAudit(func(e web.AuditEntry) {
-		log.Printf("audit: %s %s queue=%s allowed=%t err=%v",
-			e.Subject, e.Action, e.Queue, e.Allowed, e.Err)
+		log.Printf("audit: %s via %s %s queue=%s allowed=%t err=%v",
+			e.Subject, e.Via, e.Action, e.Queue, e.Allowed, e.Err)
 	}),
 )
 ```
 
-`Authorizer` is `func(*http.Request) (subject string, ok bool)`, so anything
-with real users should wire it to an existing session or SSO check rather than
-using the bundled bearer token. The `subject` is what lands in the audit log.
+Credentials and permission are separate ideas here, which is what keeps both
+simple. `WithLogin` and `WithTokens` answer *who is this*, producing an
+`Identity` of `{Subject, Via}`. `ControlPolicy` answers *what may they do*:
+
+```go
+web.WithControls(web.AllowSignedIn)                       // anyone holding a credential
+web.WithControls(web.AllowSubjects("ops@example.com"))    // named operators only
+web.WithControls(func(id web.Identity) bool {             // or your own rule
+	return id.Via == web.ViaSession && strings.HasSuffix(id.Subject, "@example.com")
+})
+```
+
+Controls with no credential source is a construction error rather than a page of
+dead buttons.
 
 What you get: **pause**, **resume**, and **worker range** per queue. All three
 are reversible.
@@ -243,20 +287,74 @@ Other properties worth knowing:
   rather than 401, so a read-only deployment has no write surface to probe.
 - Every attempt is audited, including rejected ones. A refused control action
   is the interesting one.
-- Forms carry a per-handler CSRF token, compared in constant time. It is
-  rendered only into the page, so a cross-site post cannot supply it.
-- The bearer token travels in a header. Serve the dashboard over TLS.
-- Authorization covers **controls only**. The read-only views are not
-  protected... put your own middleware in front if history is sensitive.
+- Forms carry a per-session CSRF token, compared in constant time and rendered
+  only into the page, so a cross-site post cannot supply it. It dies with the
+  session rather than living as long as the process.
+- Token callers skip CSRF, deliberately: it defends credentials a browser
+  attaches by itself, and no other site can make a browser send an
+  `Authorization` header. A script is one request, not two.
+- Every attempt records `Via`, so the audit log distinguishes a human clicking
+  pause from a script calling it.
+- The token travels in a header. Serve the dashboard over TLS.
+
+## JSON
+
+Off by default. `WithJSON()` serves the read views as JSON as well as HTML, for
+a frontend of your own, a monitoring script, or curl:
+
+```go
+handler, err := web.New("/cq", st, sk, web.WithQueues(queue), web.WithJSON())
+```
+
+| Endpoint | Returns |
+| --- | --- |
+| `GET /cq/jobs.json` | A filtered page of history, with `total`, `pages` and the window it was read against |
+| `GET /cq/jobs/{key}.json` | One job with its attempts and reschedule lineage |
+| `GET /cq/live.json` | Live queue state, pending jobs, schedules, stored counts, sink health |
+
+`jobs.json` takes the same query parameters as the HTML page — `queue`, `name`,
+`state`, `q`, `attr`, `value`, `page`, `before` — because it is the same code
+path with a different representation.
+
+**Paging is a frozen window.** Every response echoes `before`; pass it back on
+the next request and the listing stays consistent while new jobs keep arriving.
+Without it, offsets silently repeat and skip rows.
+
+**The field names are a promise.** They come from hand-written structs in the
+`web` package, not from marshalling the store types, so internal renames cannot
+leak into your client. New fields may appear; existing ones keep their meaning;
+a breaking change bumps `api_version`. Times are RFC 3339, durations are integer
+microseconds (`wait_us`, `exec_us`, because cq jobs routinely finish in well
+under a millisecond), and things that never happened are **absent** rather than
+zero... a job with no `progress` object never reported any, which is different
+from `0 of 0`.
+
+Authentication is the same gate as the HTML views, with one difference: a JSON
+request that is not authenticated gets **401 with a JSON body** rather than a
+303 to the login form, since a redirect would answer 200 with HTML and look like
+success. A session cookie works, so your own frontend needs nothing extra; a
+bearer token works too, and mints no session.
+
+**No CORS headers are ever sent**, deliberately. These endpoints accept the
+session cookie, so `Access-Control-Allow-Origin: *` would let any site a
+logged-in operator visits read their entire job history. Same-origin only; put
+your frontend behind the same host, or proxy it.
+
+Writes stay out of JSON. Controls are form posts, and a script can drive them
+with a bearer token and no CSRF token.
+
+If you are in the same Go process, you may not need any of this: `store.Store`
+is exported, so `st.Jobs(ctx, filter)`, `st.GroupJobs` and `st.Timeline` are
+already yours to call directly.
 
 ## Other databases
 
 SQLite and Postgres are both bundled, and neither is assumed. `store.Store` is
 the only seam: the sink and the web layer never touch a driver. A new backend is one
 package implementing that interface, and `store/storetest` is the conformance
-suite it must pass... the same 21 cases the SQLite driver runs, covering the
-semantics rather than the SQL: out-of-order merges, epoch isolation, lineage
-scoping, prune boundaries, frozen pagination windows.
+suite it must pass... the same 21 cases both drivers run, covering the
+semantics rather than the SQL: out-of-order merges, epoch and queue isolation,
+lineage scoping, prune boundaries, frozen pagination windows.
 
 ### Bringing your own database handle
 

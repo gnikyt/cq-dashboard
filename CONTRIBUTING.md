@@ -76,7 +76,7 @@ go run ./cmd/demo -pg 'postgres://user:pass@localhost:5432/cqdash'
 │   ├── sqlite/    # SQLite driver (bundles a pure-Go engine)
 │   └── postgres/  # Postgres driver (bring your own *sql.DB)
 ├── sink/          # cq hooks to stored history, without blocking a worker
-├── web/           # Handler, templates, auth, controls
+├── web/           # Handler, templates, auth, controls, JSON
 ├── cmd/demo/      # Worked example generating realistic traffic
 └── example/       # Compiles the README's wiring, so the docs cannot rot
 ```
@@ -124,8 +124,36 @@ belongs to whoever wires up the program.
 The suite is the specification. It pins the semantics that are easy to get
 subtly wrong and impossible to notice by eye: out-of-order events merging
 without regressing state, epoch isolation for cq's per-process job IDs,
-lineage scoped to one epoch, prune never touching unfinished work, and a
+lineage scoped to one epoch and queue, prune never touching unfinished work, and a
 frozen `Before` window for pagination.
+
+### The JSON contract
+
+`web/json.go` holds hand-written wire structs, deliberately separate from the
+store types: those are internal and free to change, these are a promise to
+whoever wrote a client. Renaming a JSON field is a breaking change and needs an
+`api_version` bump; adding one is not. `web/json_test.go` asserts the field
+names for that reason... it fails on a rename rather than letting a stranger's
+dashboard find out.
+
+Two rules that are not negotiable there: never set a CORS header (the endpoints
+accept the session cookie, so a permissive origin hands over a logged-in
+operator's history), and answer JSON requests with 401 rather than a redirect.
+
+### Auth model
+
+Two ideas, kept apart:
+
+- **Credentials** answer *who is this*. `WithLogin` for humans (a signed session
+  cookie), `WithTokens` for machines (an `Authorizer` reading a header). Both
+  produce an `Identity{Subject, Via}`.
+- **Policy** answers *what may they do*. `ControlPolicy` gates the write
+  actions; the views are gated by whether an identity is required at all.
+
+Token identities skip CSRF because no other site can make a browser send an
+`Authorization` header. That is why `BasicAuth` must never be a `WithTokens`
+credential: browsers resend it by themselves, which breaks the assumption. It
+belongs in `RequireAuth`, outside the handler.
 
 ### Templates
 
