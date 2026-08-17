@@ -36,11 +36,13 @@ type Handler struct {
 	mux        *http.ServeMux
 	prefix     string
 
-	queueByName map[string]*cq.Queue
-	controls    bool
-	auth        Authorizer
-	onAudit     func(AuditEntry)
-	csrf        string
+	queueByName   map[string]*cq.Queue
+	controls      bool
+	controlPolicy ControlPolicy
+	tokens        []Authorizer
+	requireAuth   bool
+	json          bool
+	onAudit       func(AuditEntry)
 
 	login         PasswordCheck
 	secret        []byte
@@ -69,15 +71,59 @@ func WithSchedulers(schedulers ...*cq.Scheduler) Option {
 	}
 }
 
+// WithTokens registers credentials carried in a header, for scripts and for
+// the JSON endpoints. Each is tried in order, and the first to recognize the
+// request wins.
+//
+// This adds a way to authenticate, not a requirement to: reads stay open
+// unless WithLogin or RequireSignIn says otherwise. Combine it with WithLogin
+// and one deployment serves both humans and machines.
+//
+// Do not pass BasicAuth here... see its documentation for why.
+func WithTokens(auths ...Authorizer) Option {
+	return func(h *Handler) {
+		h.tokens = append(h.tokens, auths...)
+	}
+}
+
+// RequireSignIn refuses every request without an identity.
+//
+// WithLogin already implies this, so it is for the token-only case: a
+// dashboard with no login form whose views are still not public. Browsers get
+// a 401 rather than a form, since there is none to send them to.
+func RequireSignIn() Option {
+	return func(h *Handler) {
+		h.requireAuth = true
+	}
+}
+
 // WithControls enables the write actions: pause, resume, and worker scaling.
 //
-// An Authorizer is required, not optional. These act on a running queue, so
-// there is no configuration in which exposing them unauthenticated is correct.
-// Controls are off entirely unless this option is passed.
-func WithControls(auth Authorizer) Option {
+// A ControlPolicy is required, not optional. These act on a running queue, so
+// there is no configuration in which exposing them unauthenticated is correct,
+// and controls are off entirely unless this option is passed. Pass
+// AllowSignedIn to let every authenticated caller act, or AllowSubjects to
+// name the operators who may.
+//
+// A credential source is required too: without WithLogin or WithTokens there
+// is no identity for the policy to judge, which New reports as an error rather
+// than as silently dead buttons.
+func WithControls(policy ControlPolicy) Option {
 	return func(h *Handler) {
 		h.controls = true
-		h.auth = auth
+		h.controlPolicy = policy
+	}
+}
+
+// WithJSON serves the read views as JSON as well as HTML: jobs.json,
+// jobs/{key}.json and live.json.
+//
+// Off by default, and the routes are not registered when it is off, so a
+// deployment that does not want a machine-readable surface has none to probe.
+// The field names are a compatibility promise... see the README.
+func WithJSON() Option {
+	return func(h *Handler) {
+		h.json = true
 	}
 }
 
@@ -101,8 +147,14 @@ func New(prefix string, st store.Store, sk *sink.Sink, opts ...Option) (*Handler
 	if h.optErr != nil {
 		return nil, h.optErr
 	}
-	if h.controls && h.auth == nil && h.login == nil {
-		return nil, errors.New("web: WithControls requires an Authorizer or WithLogin")
+	if h.controls && h.controlPolicy == nil {
+		return nil, errors.New("web: WithControls requires a ControlPolicy, such as AllowSignedIn")
+	}
+	if h.controls && h.login == nil && len(h.tokens) == 0 {
+		return nil, errors.New("web: WithControls needs a credential source: WithLogin or WithTokens")
+	}
+	if h.requireAuth && h.login == nil && len(h.tokens) == 0 {
+		return nil, errors.New("web: RequireSignIn needs a credential source: WithLogin or WithTokens")
 	}
 
 	h.queueByName = make(map[string]*cq.Queue, len(h.queues))
@@ -113,12 +165,6 @@ func New(prefix string, st store.Store, sk *sink.Sink, opts ...Option) (*Handler
 		}
 		h.queueByName[name] = queue
 	}
-
-	csrf, err := newCSRFToken()
-	if err != nil {
-		return nil, err
-	}
-	h.csrf = csrf
 
 	tmpl, err := template.New("").Funcs(h.funcs()).ParseFS(templateFS, "templates/*.html")
 	if err != nil {
@@ -138,6 +184,10 @@ func New(prefix string, st store.Store, sk *sink.Sink, opts ...Option) (*Handler
 		h.mux.HandleFunc("POST /login", h.loginSubmit)
 		h.mux.HandleFunc("POST /logout", h.logout)
 	}
+	if h.json {
+		h.mux.HandleFunc("GET /jobs.json", h.jobsJSON)
+		h.mux.HandleFunc("GET /live.json", h.liveJSON)
+	}
 	if h.controls {
 		h.mux.HandleFunc("POST /control/pause", h.pause)
 		h.mux.HandleFunc("POST /control/resume", h.resume)
@@ -149,7 +199,7 @@ func New(prefix string, st store.Store, sk *sink.Sink, opts ...Option) (*Handler
 // ServeHTTP implements http.Handler.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	routed := http.StripPrefix(h.prefix, h.mux)
-	if h.login != nil {
+	if h.login != nil || h.requireAuth {
 		h.gate(routed).ServeHTTP(w, r)
 		return
 	}
@@ -553,6 +603,12 @@ func (h *Handler) list(r *http.Request, filter store.Filter, path string) (listi
 	if raw := r.URL.Query().Get("before"); raw != "" {
 		if micros, err := strconv.ParseInt(raw, 10, 64); err == nil {
 			filter.Before = time.UnixMicro(micros)
+		} else if parsed, err := time.Parse(timeFormat, raw); err == nil {
+			// The JSON API reports the window as RFC 3339, so take it back in
+			// the form it was handed out... the pager still uses microseconds.
+			filter.Before = parsed
+		} else if parsed, err := time.Parse(time.RFC3339Nano, raw); err == nil {
+			filter.Before = parsed
 		}
 	} else if page > 1 {
 		filter.Before = time.Now()
@@ -741,6 +797,12 @@ type jobData struct {
 // job renders one submission with its attempts and reschedule lineage.
 func (h *Handler) job(w http.ResponseWriter, r *http.Request) {
 	key := r.PathValue("key")
+	// Stored keys are "epoch:queue:id" and never contain a dot, so a .json
+	// suffix is a request for the JSON form rather than part of the key.
+	if h.json && strings.HasSuffix(key, ".json") {
+		h.jobJSONByKey(w, r, strings.TrimSuffix(key, ".json"))
+		return
+	}
 	job, attempts, err := h.store.Job(r.Context(), key)
 	if err != nil {
 		http.Error(w, "job not found", http.StatusNotFound)
@@ -749,7 +811,7 @@ func (h *Handler) job(w http.ResponseWriter, r *http.Request) {
 
 	// A logical job spans every submission sharing this root... reschedule and
 	// release mint a new ID per hop.
-	lineage, err := h.store.Lineage(r.Context(), job.Epoch, job.RootID)
+	lineage, err := h.store.Lineage(r.Context(), job.Epoch, job.Queue, job.RootID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

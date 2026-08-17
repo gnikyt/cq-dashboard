@@ -170,7 +170,7 @@ func TestSinkLinksRescheduleLineage(t *testing.T) {
 	queue.Stop(true)
 	sk.Close()
 
-	chain, err := st.Lineage(context.Background(), sk.Epoch(), handle.ID())
+	chain, err := st.Lineage(context.Background(), sk.Epoch(), queue.Stats().Name, handle.ID())
 	if err != nil {
 		t.Fatalf("Lineage(): %v", err)
 	}

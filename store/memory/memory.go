@@ -376,14 +376,17 @@ func (s *Store) Job(_ context.Context, key string) (store.Job, []store.Attempt, 
 	return job, attempts, nil
 }
 
-// Lineage returns every submission sharing a root within one epoch.
-func (s *Store) Lineage(_ context.Context, epoch string, rootID string) ([]store.Job, error) {
+// Lineage returns every submission sharing a root within one epoch and queue.
+func (s *Store) Lineage(_ context.Context, epoch string, queue string, rootID string) ([]store.Job, error) {
 	s.mut.RLock()
 	defer s.mut.RUnlock()
 
 	var chain []store.Job
 	for _, job := range s.jobs {
-		if job.Epoch != epoch || (job.RootID != rootID && job.ID != rootID) {
+		if job.Epoch != epoch || job.Queue != queue {
+			continue
+		}
+		if job.RootID != rootID && job.ID != rootID {
 			continue
 		}
 		job.Attributes = maps.Clone(job.Attributes)

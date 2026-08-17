@@ -401,13 +401,14 @@ func (s *Store) Job(ctx context.Context, key string) (store.Job, []store.Attempt
 	return job, attempts, rows.Err()
 }
 
-// Lineage returns every submission sharing a root within one epoch, oldest
-// first. Roots are cq IDs, meaningful only inside the epoch that minted them.
-func (s *Store) Lineage(ctx context.Context, epoch string, rootID string) ([]store.Job, error) {
+// Lineage returns every submission sharing a root within one epoch and queue,
+// oldest first. Roots are cq IDs, meaningful only inside the epoch and queue
+// that minted them: per-queue counters collide between siblings.
+func (s *Store) Lineage(ctx context.Context, epoch string, queue string, rootID string) ([]store.Job, error) {
 	rows, err := s.db.QueryContext(ctx, "SELECT "+jobColumns+`
-		FROM jobs WHERE epoch = ? AND (root_id = ? OR id = ?)
+		FROM jobs WHERE epoch = ? AND queue = ? AND (root_id = ? OR id = ?)
 		ORDER BY enqueued_at ASC, rowid ASC
-	`, epoch, rootID, rootID)
+	`, epoch, queue, rootID, rootID)
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: lineage: %w", err)
 	}

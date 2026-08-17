@@ -54,7 +54,8 @@ func newControlHarness(t *testing.T, opts ...Option) (*Handler, *cq.Queue, *audi
 	log := &auditLog{}
 	opts = append([]Option{
 		WithQueues(queue),
-		WithControls(BearerToken("ops@example.com", testToken)),
+		WithTokens(BearerToken("ops@example.com", testToken)),
+		WithControls(AllowSignedIn),
 		WithAudit(log.record),
 	}, opts...)
 
@@ -71,11 +72,12 @@ func newControlHarness(t *testing.T, opts ...Option) (*Handler, *cq.Queue, *audi
 }
 
 // csrfToken scrapes the token the handler rendered into its control forms.
-func csrfToken(t *testing.T, handler *Handler) string {
+func sessionCSRF(t *testing.T, handler *Handler, cookie *http.Cookie) string {
 	t.Helper()
-	// The token is only rendered for an authorized caller now.
+	// Only a session is rendered a token: it is the only identity that submits
+	// the forms.
 	req := httptest.NewRequest(http.MethodGet, "/cq/", nil)
-	req.Header.Set("Authorization", "Bearer "+testToken)
+	req.AddCookie(cookie)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	body := rec.Body.String()
@@ -98,13 +100,21 @@ func post(handler *Handler, path string, form url.Values, token string) *httptes
 	return rec
 }
 
-func TestControlsRequireAuthorizer(t *testing.T) {
+func TestControlsRequirePolicyAndCredential(t *testing.T) {
 	st := memory.Open()
 	defer st.Close()
 	sk := sink.New(st)
 
+	// A policy with nothing to judge is dead buttons, and no policy at all is
+	// an open control surface. Both are refused at construction.
 	if _, err := New("/cq", st, sk, WithControls(nil)); err == nil {
-		t.Error("New() with a nil Authorizer: got nil error, want a refusal")
+		t.Error("New() with a nil ControlPolicy: got nil error, want a refusal")
+	}
+	if _, err := New("/cq", st, sk, WithControls(AllowSignedIn)); err == nil {
+		t.Error("New() with no credential source: got nil error, want a refusal")
+	}
+	if _, err := New("/cq", st, sk, RequireSignIn()); err == nil {
+		t.Error("RequireSignIn() with no credential source: got nil error, want a refusal")
 	}
 }
 
@@ -122,10 +132,9 @@ func TestControlRoutesAbsentWhenDisabled(t *testing.T) {
 
 func TestControlRejectsMissingToken(t *testing.T) {
 	handler, queue, log := newControlHarness(t)
-	csrf := csrfToken(t, handler)
 
 	rec := post(handler, "/cq/control/pause", url.Values{
-		"queue": {"demo"}, "csrf": {csrf},
+		"queue": {"demo"},
 	}, "")
 	if rec.Code != http.StatusUnauthorized {
 		t.Errorf("POST pause unauthenticated: got %d, want 401", rec.Code)
@@ -145,10 +154,9 @@ func TestControlRejectsMissingToken(t *testing.T) {
 
 func TestControlRejectsWrongToken(t *testing.T) {
 	handler, queue, _ := newControlHarness(t)
-	csrf := csrfToken(t, handler)
 
 	rec := post(handler, "/cq/control/pause", url.Values{
-		"queue": {"demo"}, "csrf": {csrf},
+		"queue": {"demo"},
 	}, "wrong-token")
 	if rec.Code != http.StatusUnauthorized {
 		t.Errorf("POST pause with a bad token: got %d, want 401", rec.Code)
@@ -158,33 +166,79 @@ func TestControlRejectsWrongToken(t *testing.T) {
 	}
 }
 
-// An authorized request without the token cannot be a cross-site form post.
-func TestControlRejectsMissingCSRF(t *testing.T) {
+// A token caller needs no CSRF token: no other site can make a browser send an
+// Authorization header, so there is nothing to forge. Scripts stay one request.
+func TestTokenControlSkipsCSRF(t *testing.T) {
 	handler, queue, log := newControlHarness(t)
 
 	rec := post(handler, "/cq/control/pause", url.Values{"queue": {"demo"}}, testToken)
-	if rec.Code != http.StatusForbidden {
-		t.Errorf("POST pause without csrf: got %d, want 403", rec.Code)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("POST pause with a token and no csrf: got %d, want 303", rec.Code)
 	}
-	if queue.IsPaused() {
-		t.Error("queue was paused without a csrf token")
+	if !queue.IsPaused() {
+		t.Error("queue was not paused by an authorized token request")
 	}
 
 	entries := log.all()
-	if len(entries) != 1 || entries[0].Allowed {
-		t.Fatalf("audit entries: got %+v, want one rejected entry", entries)
+	if len(entries) != 1 || !entries[0].Allowed {
+		t.Fatalf("audit entries: got %+v, want one allowed entry", entries)
 	}
 	if entries[0].Subject != "ops@example.com" {
 		t.Errorf("audit subject: got %q, want the authorized subject", entries[0].Subject)
+	}
+	if entries[0].Via != ViaToken {
+		t.Errorf("audit Via: got %q, want %q", entries[0].Via, ViaToken)
+	}
+}
+
+// The browser path end to end: sign in, read the token the page rendered, and
+// pause a queue with it. This is what a human actually does, so it should be
+// covered rather than inferred from the pieces.
+func TestSessionControlWithCSRF(t *testing.T) {
+	handler, queue := newLoginHarness(t)
+	cookie := signIn(t, handler, "ops", "hunter2")
+	csrf := sessionCSRF(t, handler, cookie)
+
+	form := url.Values{"queue": {"demo"}, "csrf": {csrf}}
+	req := httptest.NewRequest(http.MethodPost, "/cq/control/pause", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("POST pause from a session: got %d, want 303 (body: %s)", rec.Code, rec.Body.String())
+	}
+	if !queue.IsPaused() {
+		t.Error("IsPaused(): got false, want true")
+	}
+}
+
+// A session caller does ride a cookie, so its POST is refused without one.
+func TestSessionControlRequiresCSRF(t *testing.T) {
+	handler, queue := newLoginHarness(t)
+	cookie := signIn(t, handler, "ops", "hunter2")
+
+	form := url.Values{"queue": {"demo"}}
+	req := httptest.NewRequest(http.MethodPost, "/cq/control/pause", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("POST pause from a session without csrf: got %d, want 403", rec.Code)
+	}
+	if queue.IsPaused() {
+		t.Error("queue was paused without a csrf token")
 	}
 }
 
 func TestPauseAndResume(t *testing.T) {
 	handler, queue, log := newControlHarness(t)
-	csrf := csrfToken(t, handler)
 
 	rec := post(handler, "/cq/control/pause", url.Values{
-		"queue": {"demo"}, "csrf": {csrf},
+		"queue": {"demo"},
 	}, testToken)
 	if rec.Code != http.StatusSeeOther {
 		t.Fatalf("POST pause: got %d, want 303", rec.Code)
@@ -194,7 +248,7 @@ func TestPauseAndResume(t *testing.T) {
 	}
 
 	rec = post(handler, "/cq/control/resume", url.Values{
-		"queue": {"demo"}, "csrf": {csrf},
+		"queue": {"demo"},
 	}, testToken)
 	if rec.Code != http.StatusSeeOther {
 		t.Fatalf("POST resume: got %d, want 303", rec.Code)
@@ -219,10 +273,9 @@ func TestPauseAndResume(t *testing.T) {
 
 func TestSetWorkerRange(t *testing.T) {
 	handler, queue, log := newControlHarness(t)
-	csrf := csrfToken(t, handler)
 
 	rec := post(handler, "/cq/control/workers", url.Values{
-		"queue": {"demo"}, "csrf": {csrf}, "min": {"2"}, "max": {"9"},
+		"queue": {"demo"}, "min": {"2"}, "max": {"9"},
 	}, testToken)
 	if rec.Code != http.StatusSeeOther {
 		t.Fatalf("POST workers: got %d, want 303", rec.Code)
@@ -240,10 +293,9 @@ func TestSetWorkerRange(t *testing.T) {
 // A rejected action must surface as an error, not a silent success.
 func TestInvalidWorkerRangeIsReported(t *testing.T) {
 	handler, queue, log := newControlHarness(t)
-	csrf := csrfToken(t, handler)
 
 	rec := post(handler, "/cq/control/workers", url.Values{
-		"queue": {"demo"}, "csrf": {csrf}, "min": {"9"}, "max": {"2"},
+		"queue": {"demo"}, "min": {"9"}, "max": {"2"},
 	}, testToken)
 	if rec.Code != http.StatusSeeOther {
 		t.Fatalf("POST workers: got %d, want 303", rec.Code)
@@ -265,10 +317,9 @@ func TestInvalidWorkerRangeIsReported(t *testing.T) {
 
 func TestUnknownQueueIs404(t *testing.T) {
 	handler, _, _ := newControlHarness(t)
-	csrf := csrfToken(t, handler)
 
 	rec := post(handler, "/cq/control/pause", url.Values{
-		"queue": {"nope"}, "csrf": {csrf},
+		"queue": {"nope"},
 	}, testToken)
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("POST pause for an unknown queue: got %d, want 404", rec.Code)
@@ -371,8 +422,8 @@ func TestRequireAuthWithNilAuthorizerDenies(t *testing.T) {
 	}
 }
 
-// One Authorizer can cover both the views and the controls.
-func TestSharedAuthorizerCoversViewsAndControls(t *testing.T) {
+// One credential can cover both the views and the controls.
+func TestTokenCoversViewsAndControls(t *testing.T) {
 	st := memory.Open()
 	defer st.Close()
 	sk := sink.New(st, sink.WithFlushTick(10*time.Millisecond))
@@ -385,35 +436,34 @@ func TestSharedAuthorizerCoversViewsAndControls(t *testing.T) {
 	queue.Start()
 	defer queue.Stop(false)
 
-	auth := BasicAuth("ops", "hunter2")
-	handler, err := New("/cq", st, sk, WithQueues(queue), WithControls(auth))
+	handler, err := New("/cq", st, sk, WithQueues(queue),
+		WithTokens(BearerToken("ops@example.com", testToken)),
+		RequireSignIn(), // No login form: the token is the only way in.
+		WithControls(AllowSignedIn))
 	if err != nil {
 		t.Fatalf("New(): %v", err)
 	}
-	guarded := RequireAuth(handler, auth)
 
-	// The page renders, and carries a CSRF token for the controls.
-	req := httptest.NewRequest(http.MethodGet, "/cq/", nil)
-	req.SetBasicAuth("ops", "hunter2")
+	// Without the token, the views are closed and there is no form to redirect
+	// to, so the answer is 401 rather than a 303 into nowhere.
 	rec := httptest.NewRecorder()
-	guarded.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("GET /cq/ with credentials: got %d, want 200", rec.Code)
-	}
-	match := regexp.MustCompile(`name="csrf" value="([a-f0-9]+)"`).FindStringSubmatch(rec.Body.String())
-	if match == nil {
-		t.Fatal("GET /cq/: no csrf token rendered for an authorized viewer")
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/cq/", nil))
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("GET /cq/ without a token: got %d, want 401", rec.Code)
 	}
 
-	// The same credentials drive a control action.
-	form := url.Values{"queue": {"demo"}, "csrf": {match[1]}}
-	post := httptest.NewRequest(http.MethodPost, "/cq/control/pause", strings.NewReader(form.Encode()))
-	post.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	post.SetBasicAuth("ops", "hunter2")
+	req := httptest.NewRequest(http.MethodGet, "/cq/", nil)
+	req.Header.Set("Authorization", "Bearer "+testToken)
 	rec = httptest.NewRecorder()
-	guarded.ServeHTTP(rec, post)
-	if rec.Code != http.StatusSeeOther {
-		t.Fatalf("POST pause with credentials: got %d, want 303", rec.Code)
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /cq/ with the token: got %d, want 200", rec.Code)
+	}
+
+	// And the same credential drives a control action.
+	if rec := post(handler, "/cq/control/pause",
+		url.Values{"queue": {"demo"}}, testToken); rec.Code != http.StatusSeeOther {
+		t.Fatalf("POST pause with the token: got %d, want 303", rec.Code)
 	}
 	if !queue.IsPaused() {
 		t.Error("IsPaused(): got false, want true")
@@ -434,7 +484,7 @@ func newLoginHarness(t *testing.T) (*Handler, *cq.Queue) {
 	handler, err := New("/cq", st, sk,
 		WithQueues(queue),
 		WithLogin(StaticPassword("ops", "hunter2"), []byte("test-secret"), time.Hour),
-		WithControls(nil), // A session is the authorization.
+		WithControls(AllowSignedIn), // The session is the credential.
 	)
 	if err != nil {
 		t.Fatalf("New(): %v", err)
@@ -763,10 +813,12 @@ func TestCSRFTokenIsNotPublic(t *testing.T) {
 		}
 	}
 
-	// And the scraped-token attack fails end to end.
-	rec := post(handler, "/cq/control/pause", url.Values{"queue": {"demo"}, "csrf": {handler.csrf}}, "")
+	// And there is no process-wide token to scrape: an unauthenticated POST is
+	// refused on the credential, whatever it puts in the csrf field.
+	rec := post(handler, "/cq/control/pause",
+		url.Values{"queue": {"demo"}, "csrf": {"guessed-token"}}, "")
 	if rec.Code != http.StatusUnauthorized {
-		t.Errorf("POST pause with a scraped token: got %d, want 401", rec.Code)
+		t.Errorf("POST pause with a guessed token: got %d, want 401", rec.Code)
 	}
 }
 
@@ -786,10 +838,6 @@ func TestCSRFTokenIsPerSession(t *testing.T) {
 	if tokenFor(first) == tokenFor(second) {
 		t.Error("csrfFor: two sessions share one token")
 	}
-	if tokenFor(first) == handler.csrf {
-		t.Error("csrfFor: session token is the process-wide token")
-	}
-
 	// One session's token must not authorize another's request.
 	form := url.Values{"queue": {"demo"}, "csrf": {tokenFor(second)}}
 	req := httptest.NewRequest(http.MethodPost, "/cq/control/pause", strings.NewReader(form.Encode()))

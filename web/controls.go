@@ -93,30 +93,32 @@ func (h *Handler) control(
 
 	queueName := r.FormValue("queue")
 
-	subject, ok := h.authorize(r)
+	id, ok := h.mayControl(r)
 	if !ok {
-		h.audit(AuditEntry{Action: action, Queue: queueName, Allowed: false})
+		h.audit(AuditEntry{Subject: id.Subject, Via: id.Via, Action: action,
+			Queue: queueName, Allowed: false})
 		w.Header().Set("WWW-Authenticate", "Bearer")
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	if !h.checkCSRF(r) {
-		h.audit(AuditEntry{Subject: subject, Action: action, Queue: queueName, Allowed: false})
+	if !h.checkCSRF(r, id) {
+		h.audit(AuditEntry{Subject: id.Subject, Via: id.Via, Action: action,
+			Queue: queueName, Allowed: false})
 		http.Error(w, "invalid csrf token", http.StatusForbidden)
 		return
 	}
 
 	queue, found := h.queueByName[queueName]
 	if !found {
-		h.audit(AuditEntry{Subject: subject, Action: action, Queue: queueName, Allowed: true,
-			Err: fmt.Errorf("unknown queue")})
+		h.audit(AuditEntry{Subject: id.Subject, Via: id.Via, Action: action,
+			Queue: queueName, Allowed: true, Err: fmt.Errorf("unknown queue")})
 		http.Error(w, "unknown queue", http.StatusNotFound)
 		return
 	}
 
 	detail, err := apply(queue, r)
 	h.audit(AuditEntry{
-		Subject: subject, Action: action, Queue: queueName,
+		Subject: id.Subject, Via: id.Via, Action: action, Queue: queueName,
 		Detail: detail, Allowed: true, Err: err,
 	})
 

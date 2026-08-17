@@ -246,9 +246,12 @@ func lineageIsScopedAndOrdered(t *testing.T, st store.Store) {
 		job("3", withLineage("1", "2"), withEnqueued(base.Add(2*time.Second))),
 		job("9", withLineage("9", ""), withEnqueued(base)),
 		job("1", withEpoch("other"), withLineage("1", ""), withEnqueued(base)),
+		// cq IDs are per-queue counters, so a sibling queue has its own job 1.
+		// It is a different job and must not join this chain.
+		job("1", withQueue("other-queue"), withLineage("1", ""), withEnqueued(base)),
 	)
 
-	chain, err := st.Lineage(context.Background(), "epoch-a", "1")
+	chain, err := st.Lineage(context.Background(), "epoch-a", "default", "1")
 	if err != nil {
 		t.Fatalf("Lineage(): %v", err)
 	}
@@ -259,6 +262,18 @@ func lineageIsScopedAndOrdered(t *testing.T, st store.Store) {
 		if hop.Epoch != "epoch-a" {
 			t.Errorf("Lineage(): got a hop from epoch %q", hop.Epoch)
 		}
+		if hop.Queue != "default" {
+			t.Errorf("Lineage(): got a hop from queue %q", hop.Queue)
+		}
+	}
+
+	// The sibling queue's job 1 has its own chain of one.
+	other, err := st.Lineage(context.Background(), "epoch-a", "other-queue", "1")
+	if err != nil {
+		t.Fatalf("Lineage(other-queue): %v", err)
+	}
+	if len(other) != 1 {
+		t.Errorf("Lineage(other-queue): got %d hops, want 1", len(other))
 	}
 }
 

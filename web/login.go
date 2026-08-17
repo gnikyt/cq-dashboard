@@ -415,7 +415,7 @@ func (h *Handler) auditLogin(r *http.Request, username string, allowed bool, rea
 
 // logout ends the session, server side as well as in the browser.
 func (h *Handler) logout(w http.ResponseWriter, r *http.Request) {
-	if !h.checkCSRF(r) {
+	if !h.checkCSRF(r, Identity{Via: ViaSession}) {
 		http.Error(w, "invalid csrf token", http.StatusForbidden)
 		return
 	}
@@ -423,7 +423,8 @@ func (h *Handler) logout(w http.ResponseWriter, r *http.Request) {
 	// valid until it expired, so anyone holding a copy stays signed in.
 	if found, ok := h.sessionFrom(r); ok {
 		h.revoked.revoke(found.ID, found.Expiry)
-		h.audit(AuditEntry{Subject: found.Subject, Action: "logout", Allowed: true})
+		h.audit(AuditEntry{Subject: found.Subject, Via: ViaSession,
+			Action: "logout", Allowed: true})
 	}
 	h.clearCookie(w, r, sessionCookie)
 	http.Redirect(w, r, h.prefix+"/login", http.StatusSeeOther)
@@ -450,7 +451,9 @@ func (h *Handler) cookiePath() string {
 	return h.prefix + "/"
 }
 
-// gate redirects unauthenticated requests to the login form.
+// gate refuses requests without an identity, in the terms the caller can act
+// on: a redirect to the form for a browser, 401 for JSON and for deployments
+// with no form to offer.
 func (h *Handler) gate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := strings.TrimPrefix(r.URL.Path, h.prefix)
@@ -458,16 +461,20 @@ func (h *Handler) gate(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		if _, ok := h.sessionSubject(r); ok {
+		if _, ok := h.identify(r); ok {
 			next.ServeHTTP(w, r)
 			return
 		}
-		// An API client with its own Authorizer still gets through.
-		if h.auth != nil {
-			if _, ok := h.auth(r); ok {
-				next.ServeHTTP(w, r)
-				return
-			}
+		// A client asking for JSON gets JSON. Redirecting it to the form would
+		// answer 200 with an HTML page, which naive clients read as success.
+		if wantsJSON(r) {
+			writeJSONError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		if h.login == nil {
+			// RequireSignIn without a login form: there is nowhere to send them.
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
 		}
 		// Escape the destination: a raw path with a query would break the link.
 		target := url.Values{"next": {r.URL.EscapedPath()}}

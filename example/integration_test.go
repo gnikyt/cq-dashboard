@@ -93,7 +93,8 @@ func TestReadmeControlsWiring(t *testing.T) {
 
 	if _, err := web.New("/cq", st, sk,
 		web.WithQueues(queue),
-		web.WithControls(web.BearerToken("ops@example.com", "token-from-env")),
+		web.WithTokens(web.BearerToken("ops@example.com", "token-from-env")),
+		web.WithControls(web.AllowSignedIn),
 		web.WithAudit(func(e web.AuditEntry) {
 			log.Printf("audit: %s %s queue=%s allowed=%t err=%v",
 				e.Subject, e.Action, e.Queue, e.Allowed, e.Err)

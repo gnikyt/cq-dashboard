@@ -56,8 +56,8 @@ func (s State) Terminal() bool {
 // same process both mint "1". Key carries that composite and is what links and
 // lookups use.
 type Job struct {
-	Key     string // Stable row identity: "<epoch>:<id>". Set by the store.
-	ID      string // cq's submission ID, unique only within an epoch.
+	Key     string // Stable row identity: "<epoch>:<queue>:<id>". Set by the store.
+	ID      string // cq's submission ID, unique only within an epoch and queue.
 	Epoch   string // Sink boot that observed the job... used for restart reconciliation.
 	Queue   string
 	Name    string
@@ -211,10 +211,12 @@ type Store interface {
 	// Job returns one job with its attempts, by composite key.
 	Job(ctx context.Context, key string) (Job, []Attempt, error)
 
-	// Lineage returns every submission sharing a root within one epoch,
-	// oldest first. Roots are cq IDs, so they only mean anything inside the
-	// epoch that minted them.
-	Lineage(ctx context.Context, epoch string, rootID string) ([]Job, error)
+	// Lineage returns every submission sharing a root within one epoch and
+	// queue, oldest first. Roots are cq IDs, which are per-queue counters, so
+	// they only mean anything inside the epoch and queue that minted them...
+	// scoping by epoch alone pulls in an unrelated job from a sibling queue
+	// that happens to share the number.
+	Lineage(ctx context.Context, epoch string, queue string, rootID string) ([]Job, error)
 
 	// Counts tallies stored jobs by state.
 	Counts(ctx context.Context) (Counts, error)

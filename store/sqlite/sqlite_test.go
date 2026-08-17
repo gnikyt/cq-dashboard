@@ -113,7 +113,7 @@ func TestLineageGroupsRescheduleChain(t *testing.T) {
 		t.Fatalf("UpsertJobs(): %v", err)
 	}
 
-	chain, err := st.Lineage(ctx, "e", "1")
+	chain, err := st.Lineage(ctx, "e", "", "1")
 	if err != nil {
 		t.Fatalf("Lineage(): %v", err)
 	}
@@ -316,7 +316,7 @@ func TestLineageIsScopedToEpoch(t *testing.T) {
 		t.Fatalf("UpsertJobs(): %v", err)
 	}
 
-	chain, err := st.Lineage(ctx, "run-a", "1")
+	chain, err := st.Lineage(ctx, "run-a", "", "1")
 	if err != nil {
 		t.Fatalf("Lineage(): %v", err)
 	}
