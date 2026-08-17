@@ -57,6 +57,12 @@ go test ./... -v -race -cover
 
 # Run the demo, which generates mixed traffic through every view
 go run ./cmd/demo -addr :8080
+
+# The Postgres suite needs a server, and skips without one
+CQ_DASH_PG_DSN=postgres://user:pass@localhost:5432/cqdash go test ./store/postgres/
+
+# The demo runs on either backend
+go run ./cmd/demo -pg 'postgres://user:pass@localhost:5432/cqdash'
 ```
 
 ### Project Structure
@@ -65,7 +71,10 @@ go run ./cmd/demo -addr :8080
 .
 ├── README.md      # Usage, boundaries, authentication
 ├── DESIGN.md      # Durable visual and UX decisions
-├── store/         # Persistence contract, plus the SQLite implementation
+├── store/         # Persistence contract and the conformance suite
+│   ├── memory/    # Dependency-free reference implementation
+│   ├── sqlite/    # SQLite driver (bundles a pure-Go engine)
+│   └── postgres/  # Postgres driver (bring your own *sql.DB)
 ├── sink/          # cq hooks to stored history, without blocking a worker
 ├── web/           # Handler, templates, auth, controls
 ├── cmd/demo/      # Worked example generating realistic traffic
@@ -106,9 +115,11 @@ func TestConformance(t *testing.T) {
 }
 ```
 
-Check a new backend against `store/memory` as well as SQLite: if the two
+Check a new backend against `store/memory` and the two real drivers: if the
 implementations disagree, the contract is underspecified and the suite needs
-the case, not the driver.
+the case, not the driver. Drivers import no engine of their own where they can
+help it... `postgres.New` and `sqlite.New` take a `*sql.DB`, so the dependency
+belongs to whoever wires up the program.
 
 The suite is the specification. It pins the semantics that are easy to get
 subtly wrong and impossible to notice by eye: out-of-order events merging

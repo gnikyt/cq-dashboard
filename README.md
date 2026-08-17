@@ -251,8 +251,8 @@ Other properties worth knowing:
 
 ## Other databases
 
-SQLite is the bundled backend, not an assumption. `store.Store` is the only
-seam: the sink and the web layer never touch a driver. A new backend is one
+SQLite and Postgres are both bundled, and neither is assumed. `store.Store` is
+the only seam: the sink and the web layer never touch a driver. A new backend is one
 package implementing that interface, and `store/storetest` is the conformance
 suite it must pass... the same 21 cases the SQLite driver runs, covering the
 semantics rather than the SQL: out-of-order merges, epoch isolation, lineage
@@ -285,6 +285,56 @@ contention rather than throughput.
 The SQL is SQLite dialect, so `New` accepts any SQLite driver, not any
 database. A Postgres handle compiles and then fails on the first query.
 
+### Postgres
+
+`store/postgres` is the second bundled backend. There is no `Open` here, only
+`New`, so you bring the `*sql.DB` and the driver with it:
+
+```go
+import (
+	"database/sql"
+
+	"github.com/gnikyt/cq-dashboard/store/postgres"
+	_ "github.com/jackc/pgx/v5/stdlib"
+)
+
+db, err := sql.Open("pgx", "postgres://user:pass@localhost:5432/cqdash")
+if err != nil {
+	log.Fatal(err)
+}
+st := postgres.New(db)
+```
+
+Everything downstream is identical, because the sink and the handler take
+`store.Store`: the line above is the only one in your program that knows which
+database is behind the dashboard. There is nothing to tune for correctness
+either, since concurrent writers are the server's problem... the WAL and
+`busy_timeout` advice above simply does not apply, and a normal pool is fine.
+
+Which is exactly why this package has no `Open`, and the asymmetry with SQLite
+is deliberate rather than tidy: `sqlite.Open` exists because those pragmas are
+load-bearing and easy to miss, so it is worth bundling an engine to get them
+right. A `postgres.Open` would set nothing and cost you a dependency, so the
+choice of driver stays yours.
+
+Note the consequence on the SQLite side: the blank import that makes
+`sqlite.Open` work sits at package scope, so importing `store/sqlite` links the
+pure-Go engine even if you only ever call `sqlite.New` with your own handle.
+Nothing links a Postgres driver you did not choose.
+
+It passes the same 21 conformance cases as SQLite. They need a real server, so
+point the suite at one:
+
+```bash
+CQ_DASH_PG_DSN=postgres://user:pass@localhost:5432/cqdash go test ./store/postgres/
+```
+
+The demo runs on either backend, which is the quickest way to see it:
+
+```bash
+go run ./cmd/demo -pg 'postgres://user:pass@localhost:5432/cqdash'
+```
+
 `store/memory` is the reference implementation: no database, no dependencies,
 and it passes the same suite. It is what this module's own tests run against,
 and it doubles as a fixture for testing application code that reads the store.
@@ -298,10 +348,10 @@ declaring its running jobs dead. Tune the margin with
 `sink.WithHeartbeat(interval, staleAfter)`; the default beats every 15s and
 declares an epoch dead after 60s of silence.
 
-The bundled SQLite driver holds a single connection and sets a 5s
-`busy_timeout`, which is what makes concurrent writers on one file work. It is
-still SQLite on one filesystem: for several machines, write a driver for a
-networked database against `store.Store`.
+On SQLite that means processes on one machine: the bundled driver holds a
+single connection and sets a 5s `busy_timeout`, which is what makes concurrent
+writers on one file work, but it is still one filesystem. Across machines, use
+Postgres... same epochs, same reconciliation, no file locking involved.
 
 ## Design notes
 

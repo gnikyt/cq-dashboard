@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"flag"
 	"log"
@@ -18,14 +19,17 @@ import (
 
 	"github.com/gnikyt/cq-dashboard/sink"
 	"github.com/gnikyt/cq-dashboard/store"
+	"github.com/gnikyt/cq-dashboard/store/postgres"
 	"github.com/gnikyt/cq-dashboard/store/sqlite"
 	"github.com/gnikyt/cq-dashboard/web"
 	cq "github.com/gnikyt/cq/v2"
+	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 func main() {
 	addr := flag.String("addr", ":8080", "listen address")
 	dsn := flag.String("db", "cq-dashboard.db", "SQLite path")
+	pgDSN := flag.String("pg", "", "Postgres DSN, used instead of SQLite when set")
 	rate := flag.Duration("rate", 300*time.Millisecond, "submission interval")
 	retain := flag.Duration("retain", time.Hour, "how long completed jobs are kept")
 	token := flag.String("token", "", "bearer token enabling write controls (empty disables them)")
@@ -33,7 +37,10 @@ func main() {
 	pass := flag.String("pass", "", "password for the login form")
 	flag.Parse()
 
-	st, err := sqlite.Open(*dsn)
+	// Either backend, same everything downstream: the sink and the web handler
+	// take store.Store, so this is the only place in the program that knows
+	// which database is behind it.
+	st, err := openStore(*dsn, *pgDSN)
 	if err != nil {
 		log.Fatalf("open store: %v", err)
 	}
@@ -147,6 +154,28 @@ func main() {
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer shutdownCancel()
 	_ = server.Shutdown(shutdownCtx)
+}
+
+// openStore returns a Postgres store when a DSN is given, and SQLite
+// otherwise. Postgres brings its own driver, which is why this file imports
+// pgx while the store package does not.
+func openStore(path string, pgDSN string) (store.Store, error) {
+	if pgDSN == "" {
+		return sqlite.Open(path)
+	}
+	db, err := sql.Open("pgx", pgDSN)
+	if err != nil {
+		return nil, err
+	}
+	// Fail here rather than on the first job, so a bad DSN is obvious.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := db.PingContext(ctx); err != nil {
+		db.Close() //nolint:errcheck // Already failing; the ping error is the useful one.
+		return nil, err
+	}
+	log.Print("using Postgres for history")
+	return postgres.New(db), nil
 }
 
 // registerSchedules adds one of each schedule kind so the schedules table
